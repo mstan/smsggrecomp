@@ -1,0 +1,34 @@
+# Build output
+build/
+build_recomp/
+*/build/
+*.exe
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+# vendored runtime DLLs copied next to the exe (e.g. SDL2.dll)
+*.dll
+
+# ROMs / dumps / saves — NEVER commit (PRINCIPLES #26)
+*.sms
+*.gg
+*.sg
+*.bin
+*.sav
+*.srm
+*.state
+
+# Per-run / generated artifacts
+**/__pycache__/
+*.log
+*.err
+dispatch_misses.log
+tests/last_run/
+**/*.unresolved_jumptables.log
+*.png
+*.wav
+
+# Internal working notes — never commit
+LICENSING.md
