@@ -74,7 +74,7 @@ void    vdp_render_frame(uint32_t *fb);
  * ring of VDP writes tagged with the current scanline, to detect mid-frame
  * raster effects (per-scanline hscroll, palette cycling) without the VDP
  * knowing anything about frames/scanlines/rings. NULL disables. */
-enum { VDPW_REG = 0, VDPW_CRAM = 1 };
+enum { VDPW_REG = 0, VDPW_CRAM = 1, VDPW_VRAM = 2 };
 typedef void (*VdpWriteObserver)(int kind, uint16_t addr, uint8_t value);
 void    vdp_set_write_observer(VdpWriteObserver f);
 

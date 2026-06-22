@@ -114,6 +114,31 @@ static struct { uint32_t frame; int16_t line; uint8_t kind; uint16_t addr; uint8
                  g_vdpw[SMS_VDPW_RING];
 static uint32_t  g_vdpw_pos;
 static void vdp_write_obs(int kind, uint16_t addr, uint8_t value){
+    if (kind == VDPW_VRAM){
+        /* env-armed VRAM write watch: SMS_VRAM_WATCH=<hexaddr> [SMS_VRAM_WATCH_FRAME=N].
+         * Logs the writing PC + recent function-entry chain so a single divergent
+         * VRAM byte can be attributed to the function that produced it. */
+        static int armed=-1; static uint16_t waddr; static long wframe;
+        if (armed<0){
+            const char *e=getenv("SMS_VRAM_WATCH");
+            armed = e ? 1 : 0;
+            if (armed){ waddr=(uint16_t)strtoul(e,NULL,16);
+                const char *f=getenv("SMS_VRAM_WATCH_FRAME"); wframe=f?strtol(f,NULL,10):-1; }
+        }
+        if (armed && addr==waddr && (wframe<0 || (long)g_frame==wframe)){
+#ifdef SMS_TRACE_PC
+            fprintf(stderr,"[vramwatch] frame=%llu addr=%04X val=%02X pc=%04X chain:",
+                    (unsigned long long)g_frame, addr, value, g_dbg_pc);
+#else
+            fprintf(stderr,"[vramwatch] frame=%llu addr=%04X val=%02X chain:",
+                    (unsigned long long)g_frame, addr, value);
+#endif
+            for (int j=1;j<=8 && g_enter_pos>=(uint32_t)j;j++)
+                fprintf(stderr," %04X", g_enter_ring[(g_enter_pos-j)&(SMS_ENTER_RING_SIZE-1)]);
+            fprintf(stderr,"\n");
+        }
+        return;   /* VRAM not recorded in the (reg/CRAM) ring */
+    }
     uint32_t i = g_vdpw_pos++ & (SMS_VDPW_RING - 1);
     g_vdpw[i].frame = (uint32_t)g_frame;
     g_vdpw[i].line  = (int16_t)g_vdp.line;
@@ -151,6 +176,21 @@ uint8_t sms_read8(uint16_t a){
 }
 
 void sms_write8(uint16_t a, uint8_t v){
+#ifdef SMS_TRACE_PC
+    {   /* env-armed RAM write watch: SMS_RAM_WATCH=<hexaddr> [SMS_RAM_WATCH_FRAME=N] */
+        static int armed=-1; static uint16_t waddr; static long wframe;
+        if (armed<0){ const char *e=getenv("SMS_RAM_WATCH"); armed=e?1:0;
+            if (armed){ waddr=(uint16_t)strtoul(e,NULL,16);
+                const char *f=getenv("SMS_RAM_WATCH_FRAME"); wframe=f?strtol(f,NULL,10):-1; } }
+        if (armed && a==waddr && (wframe<0 || (long)g_frame==wframe)){
+            fprintf(stderr,"[ramwatch] frame=%llu addr=%04X val=%02X pc=%04X chain:",
+                    (unsigned long long)g_frame, a, v, g_dbg_pc);
+            for (int j=1;j<=8 && g_enter_pos>=(uint32_t)j;j++)
+                fprintf(stderr," %04X", g_enter_ring[(g_enter_pos-j)&(SMS_ENTER_RING_SIZE-1)]);
+            fprintf(stderr,"\n");
+        }
+    }
+#endif
     if (a >= 0xC000){
         g_ram[(a - 0xC000) & 0x1FFF] = v;
         if (a >= 0xFFFC){                                /* Sega frame regs */
@@ -231,11 +271,12 @@ static void frame_completed(void){
     if (g_vdp_trace){
         /* End-of-frame VDP state == what the renderer would consume for this
          * frame. Hash each region separately so the diff says WHICH diverged. */
-        fprintf(g_vdp_trace, "%llu,%016llx,%016llx,%016llx,%02X,%02X,%02X,%02X\n",
+        fprintf(g_vdp_trace, "%llu,%016llx,%016llx,%016llx,%016llx,%02X,%02X,%02X,%02X\n",
                 (unsigned long long)g_frame,
                 (unsigned long long)fnv1a64(g_vdp.vram, sizeof g_vdp.vram),
                 (unsigned long long)fnv1a64(g_vdp.cram, sizeof g_vdp.cram),
                 (unsigned long long)fnv1a64(g_vdp.reg,  sizeof g_vdp.reg),
+                (unsigned long long)fnv1a64(g_ram, sizeof g_ram),
                 g_vdp.reg[8], g_vdp.reg[9], g_vdp.reg[0], g_vdp.reg[1]);
         fflush(g_vdp_trace);
     }
@@ -243,6 +284,12 @@ static void frame_completed(void){
         int nz_vram=0, nz_cram=0;
         for (int i=0;i<0x4000;i++) if (g_vdp.vram[i]) nz_vram++;
         for (int i=0;i<0x40;i++)   if (g_vdp.cram[i]) nz_cram++;
+        {   /* raw VRAM/RAM dumps (<png>.vram/.ram) for recomp-vs-interp byte diffs */
+            char vp[512]; snprintf(vp,sizeof vp,"%s.vram",g_dump_path);
+            FILE *vf=fopen(vp,"wb"); if (vf){ fwrite(g_vdp.vram,1,0x4000,vf); fclose(vf); }
+            snprintf(vp,sizeof vp,"%s.ram",g_dump_path);
+            FILE *rf=fopen(vp,"wb"); if (rf){ fwrite(g_ram,1,sizeof g_ram,rf); fclose(rf); }
+        }
         fprintf(stderr,
             "[vdp] dump@%llu disp=%d r0=%02X r1=%02X r2=%02X r5=%02X r6=%02X "
             "r7=%02X r8=%02X r9=%02X r10=%02X | vram_nz=%d cram_nz=%d line=%d\n",

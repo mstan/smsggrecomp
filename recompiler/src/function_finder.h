@@ -92,8 +92,10 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
  * $4000-$7FFF ($FFFE), $8000-$BFFF ($FFFF). Tracking all three (not just
  * slot 2) is required: slot-1 code-banking is real (e.g. bank 3 -> $4000). */
 typedef struct {
-    int  slot[3];      /* current bank in slots 0/1/2 */
-    bool slot2_known;  /* slot-2 bank established (else defer slot-2 targets) */
+    int  slot[3];      /* current bank in slots 0/1/2 (valid iff known[slot]) */
+    bool known[3];     /* slot bank statically established (else defer targets) */
+    int  a_known;      /* statically-known value of register A (0..255), or -1 *
+                        * if A's value is not statically determinable here.     */
 } BankState;
 
 void bankstate_init(BankState *bs, uint16_t entry, int entry_bank);

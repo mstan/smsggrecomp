@@ -341,8 +341,63 @@ See the measured numbers in DEBUG/handoff notes.
    them. Interactive play exercises more of them than headless attract (16 vs 8
    distinct misses in the first live session), so the hybrid's static-resolution
    backlog grows as more screens are reached — see the `[exec]` interp/static split.
-3. **Main-menu background** (`dev/menu-bg`), then **GG bring-up** (SonicBlastGG —
-   exercises the GG viewport crop, 12-bit CRAM, and PSG stereo $06 now plumbed).
+3. **Main-menu background** (`dev/menu-bg`) — found to be a non-issue (the menu
+   bg is intentionally black). Skipped.
+
+## Game Gear bring-up — Sonic Blast (2026-06-22, `dev/gg-bringup`)
+
+First end-to-end GG title. From-scratch recompile of `SonicBlastGG` (1 MB GG ROM).
+
+### Bank-state A-tracker fix (shipped) — boots GG via hybrid
+
+Sonic Blast dead-looped in reset: `bankstate_step` only matched the *tight*
+`ld a,#n ; ld ($FFFE),a` idiom and missed `ld a,$02 ; ld ($D118),a ; ld
+($FFFE),a` (an A-preserving store between the load and the frame-reg write), so
+`func_509F` decoded under bank 1 (`01 CF 41…`) instead of bank 2 (`E5 C5 21…
+otir ; jp $4E27`) and the reset's `call $509F` re-ran reset forever. Replaced the
+2-insn idiom match with a proper known-`A` value tracker (`a_known`, per-slot
+`known[3]`); shared by finder + codegen. Result: **boots + renders SEGA logo →
+Chaos-emerald → SONIC BLAST title** (GG 12-bit CRAM + viewport correct) — but
+the whole game ran in one non-returning superzazu hybrid call (computed `jp (hl)`
+dispatch tree the static finder couldn't follow). See [[bankstate-a-value-tracker]].
+
+### Automatic jump-table detection (shipped) — recompiles the main loop
+
+`function_finder.c`: on an unresolved computed `jp (hl)` (not the `push;jp(hl)`
+computed-CALL idiom), symbolically simulate the dispatch basic block to recover
+`base + index*scale` (handles `ld de/hl,base ; add hl,de/bc/hl`, `ld h,0;ld l,a`,
+`ex af,af'` index save/restore), then read entries (16-bit LE, **always stride
+2**). Count: **PROVEN** from a guard chain (`cp/sub` bound on the index) → exact;
+else **DENSE** = `(first_forward_target − base)/2`, bounded also by the first
+known-code address (`funclist_has_code`) so interleaved code can't extend a
+table. Accepted table bytes are marked DATA (`mark_data`) so the tracer won't
+decode them as code; the registry is rebuilt each fixpoint pass so dense bounds
+converge. Design conferred with ChatGPT (Z80: bound by index DOMAIN, not target
+validity — almost every byte decodes). See [[gg-bringup-jumptable-plan]].
+
+Result (Sonic Blast): **9 tables, discovery 51 → 172 functions**; the main loop
+is recompiled — `[exec]` ~75 % static / 25 % interp (was ~0 % / 100 %),
+`irq_taken` 331 over 950 frames (was 1), full real timing. **Sonic 1 SMS
+UNCHANGED** (131 funcs, 0 truncated, irq/frame 1.00, 8 misses — detector fires on
+0 tables there; its TOML/computed-call paths still cover it). No regression to
+the validated SMS baseline.
+
+### KNOWN REGRESSION (open) — Sonic Blast render breaks ~frame 264
+
+Recompiling the main loop **exposed a latent recomp divergence** (NOT a
+jump-table-logic bug per se): game RAM matches the `--interp` oracle byte-for-byte
+through frame 236, then a title-state handler cluster (`0x4Fxx–0x53xx`, active
+from frame 237) computes wrong values (a buffer at `$DB04` fills `$0222` where the
+oracle has `$0111`; a counter at `$D131` is off by one), which feed an `$8000`
+hybrid buffer-fill and corrupt RAM/VRAM → the title renders white by frame 900.
+First VRAM divergence frame 203 (one byte `$0AC2`), first *persistent* RAM
+divergence frame 237. The CPU logic is otherwise correct (RAM matches until 237).
+**Next step:** bisect the `0x4Fxx–0x53xx` cluster — compare recomp vs interp
+register state at the cluster entry, or audit its generated C for a mistranslated
+instruction. Reusable instruments built this session: raw VRAM/RAM dumps
+(`<png>.vram`/`.ram`), env-armed VRAM/RAM write watches (`SMS_VRAM_WATCH` /
+`SMS_RAM_WATCH` + `_FRAME`, `-DSMS_TRACE_PC`), per-table jt log, RAM hash column
+in `--vdp-trace`.
 
 ## ROMs — PRESENT and parser-verified
 

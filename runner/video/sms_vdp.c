@@ -65,6 +65,7 @@ void vdp_data_write(uint8_t v){
         }
     } else {
         g_vdp.vram[g_vdp.addr & 0x3FFF] = v;
+        if (g_vdp_obs) g_vdp_obs(VDPW_VRAM, (uint16_t)(g_vdp.addr & 0x3FFF), v);
     }
     g_vdp.readbuf = v;
     g_vdp.addr = (uint16_t)((g_vdp.addr + 1) & 0x3FFF);
