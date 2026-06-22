@@ -66,4 +66,16 @@ bool    vdp_irq_asserted(void);
  * render from end-of-frame state - no per-scanline raster effects yet. */
 void    vdp_render_frame(uint32_t *fb);
 
+/* Optional VDP-write observer (dev instrumentation, decoupled from the runner).
+ * Called with the RESOLVED write each time the CPU writes a VDP register or
+ * CRAM (VRAM writes are NOT reported - too high-volume, and not needed for the
+ * raster-effect question). kind is VDPW_REG (addr = register index 0..15) or
+ * VDPW_CRAM (addr = resolved CRAM index). Lets the runner keep an always-on
+ * ring of VDP writes tagged with the current scanline, to detect mid-frame
+ * raster effects (per-scanline hscroll, palette cycling) without the VDP
+ * knowing anything about frames/scanlines/rings. NULL disables. */
+enum { VDPW_REG = 0, VDPW_CRAM = 1 };
+typedef void (*VdpWriteObserver)(int kind, uint16_t addr, uint8_t value);
+void    vdp_set_write_observer(VdpWriteObserver f);
+
 #endif /* SMS_VDP_H */

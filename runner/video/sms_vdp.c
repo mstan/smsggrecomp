@@ -14,6 +14,9 @@
 
 SmsVdp g_vdp;
 
+static VdpWriteObserver g_vdp_obs;
+void vdp_set_write_observer(VdpWriteObserver f){ g_vdp_obs = f; }
+
 void vdp_reset(bool is_gg){
     memset(&g_vdp, 0, sizeof(g_vdp));
     g_vdp.is_gg = is_gg;
@@ -40,6 +43,7 @@ void vdp_control_write(uint8_t v){
     } else if (g_vdp.code == 2){
         /* register write: reg number in low nibble, value is the first byte */
         g_vdp.reg[v & 0x0F] = g_vdp.latch;
+        if (g_vdp_obs) g_vdp_obs(VDPW_REG, (uint16_t)(v & 0x0F), g_vdp.latch);
     }
 }
 
@@ -53,9 +57,11 @@ void vdp_data_write(uint8_t v){
                 uint8_t idx = (uint8_t)(g_vdp.addr & 0x3E);
                 g_vdp.cram[idx]   = g_vdp.cram_latch;
                 g_vdp.cram[idx+1] = (uint8_t)(v & 0x0F);
+                if (g_vdp_obs) g_vdp_obs(VDPW_CRAM, idx, v);   /* on commit */
             }
         } else {
             g_vdp.cram[g_vdp.addr & 0x1F] = v;
+            if (g_vdp_obs) g_vdp_obs(VDPW_CRAM, (uint16_t)(g_vdp.addr & 0x1F), v);
         }
     } else {
         g_vdp.vram[g_vdp.addr & 0x3FFF] = v;

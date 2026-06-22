@@ -74,3 +74,57 @@ void host_shutdown(void){
     g_tex = NULL; g_ren = NULL; g_win = NULL;
     SDL_Quit();
 }
+
+/* ---- audio ---- */
+static SDL_AudioDeviceID g_adev;
+static SDL_AudioStream  *g_astream;   /* PSG src_rate stereo -> device rate */
+
+bool host_audio_init(uint32_t src_rate){
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0){
+        fprintf(stderr, "[host] SDL audio init failed: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_AudioSpec want, have;
+    SDL_zero(want);
+    want.freq     = 48000;
+    want.format   = AUDIO_S16SYS;
+    want.channels = 2;
+    want.samples  = 1024;
+    want.callback = NULL;                  /* we push via SDL_QueueAudio */
+    g_adev = SDL_OpenAudioDevice(NULL, 0, &want, &have,
+                                 SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (!g_adev){
+        fprintf(stderr, "[host] SDL_OpenAudioDevice: %s\n", SDL_GetError());
+        return false;
+    }
+    g_astream = SDL_NewAudioStream(AUDIO_S16SYS, 2, (int)src_rate,
+                                   have.format, have.channels, have.freq);
+    if (!g_astream){
+        fprintf(stderr, "[host] SDL_NewAudioStream: %s\n", SDL_GetError());
+        SDL_CloseAudioDevice(g_adev); g_adev = 0;
+        return false;
+    }
+    SDL_PauseAudioDevice(g_adev, 0);       /* start playback */
+    fprintf(stderr, "[host] audio: PSG %u Hz -> device %d Hz stereo\n",
+            src_rate, have.freq);
+    return true;
+}
+
+void host_audio_submit(const int16_t *stereo_frames, size_t frame_count){
+    if (!g_astream || !g_adev || frame_count == 0) return;
+    SDL_AudioStreamPut(g_astream, stereo_frames,
+                       (int)(frame_count * 2 * sizeof(int16_t)));
+    int avail;
+    while ((avail = SDL_AudioStreamAvailable(g_astream)) > 0){
+        uint8_t tmp[8192];
+        int want = avail > (int)sizeof(tmp) ? (int)sizeof(tmp) : avail;
+        int got = SDL_AudioStreamGet(g_astream, tmp, want);
+        if (got <= 0) break;
+        SDL_QueueAudio(g_adev, tmp, (uint32_t)got);
+    }
+}
+
+void host_audio_shutdown(void){
+    if (g_astream){ SDL_FreeAudioStream(g_astream); g_astream = NULL; }
+    if (g_adev){ SDL_CloseAudioDevice(g_adev); g_adev = 0; }
+}

@@ -27,6 +27,55 @@ static int sdl_frame_cb(const uint32_t *fb, int w, int h){
 }
 #endif
 
+/* ---- audio output sinks --------------------------------------------------
+ * glue hands us interleaved-stereo S16 frames once per video frame. We fan
+ * them out to any active output: a WAV file (headless/observable dump) and/or
+ * the live SDL audio device. Both are optional and independent. */
+static FILE    *g_wav;
+static uint32_t g_wav_data_bytes;
+#ifdef SMS_HAVE_SDL
+static bool     g_audio_live;
+#endif
+
+static void wav_put32(FILE *f, uint32_t v){ fputc(v&0xFF,f); fputc((v>>8)&0xFF,f); fputc((v>>16)&0xFF,f); fputc((v>>24)&0xFF,f); }
+static void wav_put16(FILE *f, uint16_t v){ fputc(v&0xFF,f); fputc((v>>8)&0xFF,f); }
+
+static bool wav_open(const char *path, uint32_t rate){
+    g_wav = fopen(path, "wb");
+    if (!g_wav){ fprintf(stderr,"[runner] cannot open WAV %s\n", path); return false; }
+    const uint16_t ch = 2, bits = 16;
+    fwrite("RIFF",1,4,g_wav); wav_put32(g_wav, 0);            /* size patched on close */
+    fwrite("WAVE",1,4,g_wav);
+    fwrite("fmt ",1,4,g_wav); wav_put32(g_wav, 16);
+    wav_put16(g_wav, 1);                                      /* PCM */
+    wav_put16(g_wav, ch);
+    wav_put32(g_wav, rate);
+    wav_put32(g_wav, rate * ch * (bits/8));                   /* byte rate */
+    wav_put16(g_wav, (uint16_t)(ch * (bits/8)));              /* block align */
+    wav_put16(g_wav, bits);
+    fwrite("data",1,4,g_wav); wav_put32(g_wav, 0);            /* size patched on close */
+    g_wav_data_bytes = 0;
+    fprintf(stderr,"[runner] writing audio to %s (%u Hz S16 stereo)\n", path, rate);
+    return true;
+}
+static void wav_close(void){
+    if (!g_wav) return;
+    fflush(g_wav);
+    fseek(g_wav, 4,  SEEK_SET); wav_put32(g_wav, 36 + g_wav_data_bytes);
+    fseek(g_wav, 40, SEEK_SET); wav_put32(g_wav, g_wav_data_bytes);
+    fclose(g_wav); g_wav = NULL;
+}
+
+static void audio_sink(const int16_t *frames, size_t n){
+    if (g_wav){
+        fwrite(frames, 2*sizeof(int16_t), n, g_wav);
+        g_wav_data_bytes += (uint32_t)(n * 2 * sizeof(int16_t));
+    }
+#ifdef SMS_HAVE_SDL
+    if (g_audio_live) host_audio_submit(frames, n);
+#endif
+}
+
 static int ci_cmp(const char *a, const char *b){
     for (; *a && *b; a++, b++){
         int ca=*a, cb=*b;
@@ -47,9 +96,12 @@ int main(int argc, char **argv){
     int force_gg = -1;
     uint64_t dump_frame = 0;
     const char *dump_out = NULL;
+    const char *vdp_trace = NULL;   /* per-frame VDP-state CSV (oracle diff) */
     bool want_window = false;
     int  win_scale = 3;
     bool interp = false;       /* oracle: run the reference superzazu interpreter */
+    const char *audio_wav = NULL;   /* dump PSG output to this WAV */
+    bool mute = false;              /* suppress live SDL audio (window build) */
 
     bool frames_set = false;
     for (int i=1;i<argc;i++){
@@ -58,8 +110,11 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--sms")==0) force_gg = 0;
         else if (strcmp(argv[i],"--dump-frame")==0 && i+1<argc) dump_frame = strtoull(argv[++i],NULL,0);
         else if (strcmp(argv[i],"--dump-out")==0 && i+1<argc) dump_out = argv[++i];
+        else if (strcmp(argv[i],"--vdp-trace")==0 && i+1<argc) vdp_trace = argv[++i];
         else if (strcmp(argv[i],"--force-display")==0){ extern int g_vdp_force_display; g_vdp_force_display=1; }
         else if (strcmp(argv[i],"--interp")==0) interp = true;
+        else if (strcmp(argv[i],"--audio-wav")==0 && i+1<argc) audio_wav = argv[++i];
+        else if (strcmp(argv[i],"--mute")==0) mute = true;
         else if (strcmp(argv[i],"--window")==0){
             want_window = true;
             if (i+1<argc && argv[i+1][0] != '-') win_scale = (int)strtol(argv[++i],NULL,0);
@@ -68,7 +123,8 @@ int main(int argc, char **argv){
         else fprintf(stderr,"[runner] unknown arg: %s\n", argv[i]);
     }
     if (!rom){
-        fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms]\n", argv[0]);
+        fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms] "
+                       "[--window [scale]] [--audio-wav out.wav] [--mute] [--interp]\n", argv[0]);
         return 2;
     }
 
@@ -86,6 +142,7 @@ int main(int argc, char **argv){
 
     glue_init(is_gg, frames);
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
+    if (vdp_trace) glue_set_vdp_trace(vdp_trace);
 
     if (want_window){
         (void)win_scale;   /* used only in the SDL block below */
@@ -106,6 +163,20 @@ int main(int argc, char **argv){
 #endif
     }
 
+    /* Audio outputs (independent; either/both may be active). */
+    bool audio_on = false;
+#ifdef SMS_HAVE_SDL
+    if (want_window && !mute){
+        if (host_audio_init(glue_audio_sample_rate())){ g_audio_live = true; audio_on = true; }
+    }
+#else
+    (void)mute;
+#endif
+    if (audio_wav){
+        if (wav_open(audio_wav, glue_audio_sample_rate())) audio_on = true;
+    }
+    if (audio_on) glue_set_audio_sink(audio_sink);
+
     if (interp){
         fprintf(stderr,"[runner] ORACLE reference mode (superzazu interpreter)\n");
         glue_run_interp();
@@ -114,8 +185,10 @@ int main(int argc, char **argv){
     }
 
 #ifdef SMS_HAVE_SDL
+    if (g_audio_live) host_audio_shutdown();
     if (want_window) host_shutdown();
 #endif
+    wav_close();
 
     fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
             (unsigned long long)glue_frame_count(), glue_dispatch_miss_count());

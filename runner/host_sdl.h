@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Open a window showing the `crop_w`x`crop_h` region at (`crop_x`,`crop_y`) of
  * the runner's 256x192 ARGB framebuffer, scaled by `scale`. Returns false on
@@ -26,5 +27,17 @@ bool host_init(int fb_w, int fb_h,
 bool host_present(const uint32_t *fb, int fb_w, int fb_h);
 
 void host_shutdown(void);
+
+/* ---- audio ----
+ * Open an SDL audio device and an SDL_AudioStream that resamples the PSG's
+ * native `src_rate` (interleaved-stereo S16) to the device rate. Returns false
+ * on failure (the caller then runs without sound). */
+bool host_audio_init(uint32_t src_rate);
+
+/* Submit `frame_count` interleaved-stereo S16 frames; they are resampled and
+ * queued to the device. Safe to call with the device unopened (no-op). */
+void host_audio_submit(const int16_t *stereo_frames, size_t frame_count);
+
+void host_audio_shutdown(void);
 
 #endif /* HOST_SDL_H */

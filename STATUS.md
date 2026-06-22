@@ -17,7 +17,7 @@ not two repos. No `ggrecomp`.
 | Project structure + discipline docs | `PRINCIPLES.md`, `CLAUDE.md`, `README.md`, `DEBUG.md` | — |
 | Vendored TOML parser | `recompiler/src/toml.{c,h}` | from genesis, unchanged |
 | Vendored Z80 interpreter (MIT) | `runner/external/superzazu/` | reference + hybrid path |
-| Clean-room SN76489 PSG | `runner/audio/sn76489.{c,h}` | ports directly (needs `sms_clocks.h`) |
+| Clean-room SN76489 PSG | `runner/audio/sn76489.{c,h}` | wired + verified — Z80-clocked, stereo, plays Sonic 1 SMS music (see PSG audio §) |
 | **SMS/GG ROM parser** | `recompiler/src/rom_parser.{c,h}` | TMR SEGA footer, region→platform, size, CRC32, Sega/Codemasters mapper |
 | **Z80 instruction decoder** | `recompiler/src/z80_decoder.{c,h}` | `tests/z80_decoder_selftest.c` — ALL PASS (length/prefix/CF/target across base, CB, ED, DD/FD, DDCB) |
 | **Z80 semantic core** (flags/ALU/rotates/DAA) | `runner/include/z80_ops.h` + `sms_runtime.h` | `tests/z80_ops_selftest.c` — ALL PASS; logic ported from superzazu |
@@ -59,7 +59,7 @@ A headless runner links the generated C and executes the game:
   interrupt timing (no pixel rendering yet — the loop needs interrupts, not
   pixels). SMS + GG share it (GG only differs in 12-bit CRAM).
 - `runner/glue.{c,h}` — `g_z80`, Sega/Codemasters ROM mapper + 8 KB RAM, bus
-  read/write, I/O ($BE/$BF/$7E/$7F/controllers; PSG + GG ports stubbed),
+  read/write, I/O ($BE/$BF/$7E/$7F PSG/controllers; PSG now wired, GG $06 stereo plumbed),
   `sms_sync` (advance VDP + take IM1 IRQ when IFF1), `sms_halt`,
   `sms_dispatch_miss` → `dispatch_misses.log`, frame-limit longjmp shutdown.
 - `runner/game_spec.h` + `runner/game_layout.h` — per-game contract structs
@@ -208,37 +208,119 @@ real VBlanks), `g_irq_taken` (IM1 handler runs), `g_irq_reentrant`,
 2** (the expected main→ISR nesting) at every point — title AND gameplay. So
 `g_frame` tracks real VBlanks 1:1; the previously-reported ~3x over-count was a
 symptom of the pre-hybrid stack corruption (no-op'd misses leaking SP) and the
-hybrid fix resolved it. The SDL host presents once per `g_frame` under vsync, so
-the live window already runs at realtime.
+hybrid fix resolved it. The SDL host presents once per `g_frame` under vsync —
+which only equals realtime on a **60 Hz** display; on a higher-refresh monitor
+the loop runs at `refresh/60 ×` speed (see Known issues #1).
 
-### GHZ background band — characterised (NOT raster)
+### GHZ background band — recomp/palette/VRAM all PROVEN CORRECT; no demonstrable bug from internal evidence
 
-The colourful band in the GHZ frames is a **garbage strip in one region of the
-background nametable/tile data** — it scrolls *with* the background (tracked
-from upper-left at frame 6000, `r8=3D r9=D0`, to horizon-centre at frame 6090,
-`r8=57 r9=C0`). It is NOT a per-scanline raster effect: at both frames `r10=FF`
-and `r0` bit4 = 0, so line interrupts are OFF. Everything else (Sonic, ground,
-palm trees, flowers, rings, water line, HUD) is pixel-accurate, so it is one
-graphics strip (GHZ distant-scenery/horizon) that a load/decompress path didn't
-populate correctly. Root-causing renderer-vs-recomp needs a VRAM diff against a
-reference — i.e. the oracle below. (Probe shots: `runner/ghz_probe.png` frame
-6000, `runner/ghz_6090.png` frame 6090.)
+Closed the oracle diff (2026-06-21). NOTE: an intermediate conclusion of "shared
+palette bug" was WRONG and was corrected by a ROM check (below) - the palette is
+loaded verbatim from ROM. Built three reusable instruments and ran them:
+- **`--vdp-trace <csv>`** (glue.c) — per-frame FNV hash of VRAM/CRAM/regs, always-on
+  from frame 0, identical in `glue_run` and `glue_run_interp`.
+- **VDP-write ring** (glue.c `vdp_write_obs` + `vdp_set_write_observer` in sms_vdp.c) —
+  always-on ring of every register/CRAM write tagged with the scanline; replayed for
+  the just-finished frame at the dump frame.
+- One-shot nametable / CRAM / tile-pattern dump at the dump frame (frame_completed).
+
+Findings (SonicTheHedgehogSMS, frame 6000, GHZ gameplay):
+1. **NOT a recomp/CPU bug.** Per-frame state diff recomp vs `--interp`: VRAM matches
+   96.8 % of 6200 frames, CRAM 99.5 %; mismatches are transient upload-timing drift
+   that re-converges. At the band frames (6000/6090/6200) VRAM **and** CRAM **and** all
+   VDP regs are **byte-identical** and the dumped PNGs share a SHA256. The recompiled
+   CPU (incl. its hybrid fallback) produces the same VRAM/CRAM as a clean MIT Z80.
+2. **NOT a raster effect.** The write-ring shows only ~4 reg/CRAM writes in the whole
+   frame, **all during vblank, ZERO during active display** — no mid-frame hscroll or
+   palette cycling. The single-snapshot renderer is faithful here. (The earlier
+   "line-ints off" claim was sampled at end-of-frame = unsound; the ring is the sound
+   probe and confirms no raster anyway.)
+3. **Palette is CORRECT (verbatim from ROM).** The band is a background scenery element
+   (tiles `0FC..0FF`, nametable palette bit = 0 → palette 0) whose pixels use colour
+   indices 13/14/15 = yellow/black/white. Searching the ROM, our **entire live 32-byte
+   CRAM is byte-identical to the ROM palette table at 0x629E** (palette-0 + the sprite
+   palette at 0x62AE both match exactly), so idx13=yellow is what the game intends (a
+   real GHZ palette colour, e.g. for flowers). The recompiled + interp runs both load
+   this table faithfully.
+
+**Net:** the band renders from a CORRECT palette (verbatim ROM), CORRECT VRAM (matches
+the reference interpreter) with no raster and a standard mode-4 decoder — so the output
+is faithful to what the ROM data specifies. There is **no demonstrable bug from internal
+evidence**.
+
+**Most likely it is CORRECT ART, not a bug.** ChatGPT (consulted via the recomp thread,
+having read SMS Power's stitched Act 1 map) reports the 8-bit GHZ background genuinely
+has "repeated jagged skyline/mountain elements ... pink/purple/blue with bright yellow
+highlights" — i.e. the SMS GHZ distant scenery is jagged and colourful (unlike the
+plain-sky Genesis GHZ one mentally compares to). So our yellow/white/black jagged block
+is plausibly the intended distant-mountain highlight set. Verdict: "the runner is
+faithfully drawing what the ROM loaded; the only remaining uncertainty is whether your
+eyes expect Genesis-style GHZ."
+
+DECISIVE confirmation — **DONE (2026-06-21): CONFIRMED CORRECT ROM ART.** Installed
+Emulicious (accurate SMS emulator, `_diag/emu/`), ran `sonicthehedgehog.sms` to GHZ Act 1
+attract-demo, captured + cropped the horizon band, and compared side-by-side against the
+recomp (`_diag/emu_vs_recomp_band.png`, `_diag/emu_ghz_full.png`, `_diag/emu_ghz_horizon.png`).
+The emulator renders the **identical** jagged pink/yellow/white/blue dithered skyline — same
+palette, same dithering, same silhouette (incl. the distinctive tall central peak with a
+pink/white tip flanked by blue spikes). The "garbage band" is intended Green Hill Zone
+background art; the recompiler reproduces it faithfully. **Not a bug — closed.**
+
+### PSG audio — DONE (wired + verified; live watch awaits user, #23)
+
+The clean-room SN76489 is now wired end-to-end and producing recognisable music.
+
+- **`sn76489.{c,h}` re-based on the SMS Z80 clock + made stereo.** It previously
+  `#include`d a non-existent `genesis_clocks.h` (vendored from clownmdemu, never
+  built here). Now clocked off Z80 T-states (`/16` → ~223.7 kHz via `sms_clocks.h`),
+  and renders **stereo** so the GG stereo register ($06) routes each channel L/R
+  (SMS keeps the default 0xFF mask → both sides identical). Clean-room synthesis
+  math unchanged; `psg_advance(z80_cycles)` / `psg_write` / `psg_write_stereo(mask)`
+  / `psg_render(stereo frames)`.
+- **Wired into `glue.c`.** `sms_io_out`: $40–$7F → `psg_write`, GG $06 → `psg_write_stereo`.
+  The PSG is advanced inside `advance_vdp()` — the single VDP-timing choke point shared
+  by the recomp, hybrid, and interp paths — so audio is identical on every path and stays
+  in lockstep with video. Synthesis runs only when an audio sink is attached
+  (`glue_set_audio_sink`), so headless oracle/diff runs pay nothing (6200 frames still
+  207 ms; 8 misses unchanged). Each completed frame's output is drained to the sink.
+- **Outputs (main.c, fan-out sink).** `--audio-wav out.wav` writes an observable
+  S16-stereo WAV at the native rate (headless, deterministic, diffable); the SDL window
+  build (`-DSMS_HAVE_SDL`) opens a live audio device via `host_audio_{init,submit,shutdown}`
+  (SDL_AudioStream resamples 223.7 kHz → 48 kHz), `--mute` to silence. Both may be active.
+- **Verified:** Sonic 1 SMS, 2400-frame run → `_diag/sonic_audio.wav` (40 s): 71.9 %
+  non-silent, peak 21565 (no clipping), `L==R` (correct SMS mono), and a clear musical
+  RMS envelope — intro jingle (0–8 s) with dynamics, rests, then sustained GHZ attract
+  music (20–38 s) with accents/phrasing (recognisable note durations ⇒ pitch + tempo
+  correct). The `--interp` oracle path produces the same. Both builds warning-clean.
+  **Awaits user listen-test (#23) for the by-ear confirmation.**
+
+### Known issues — observed in the first live window run (2026-06-21, user)
+
+Watching the windowed build run live surfaced behavioural issues. None block this
+checkpoint (the recomp + audio core is sound); captured here as dev targets:
+
+1. **Speed/timing way off — the attract demo runs too fast.** Prime suspect: the
+   SDL host paces the loop purely on `SDL_RENDERER_PRESENTVSYNC` (host_present
+   blocks to vsync), so on a >60 Hz display the game runs at `refresh/60 ×`
+   realtime (e.g. 120 Hz → 2×). Needs a real 60 fps cap (wall-clock or audio-buffer
+   paced) independent of monitor refresh. Not caused by the audio wiring (that only
+   synthesises; pacing is unchanged). NOT yet diagnosed/confirmed.
+2. **No input.** Expected — controller ports $DC/$DD still return idle 0xFF; input
+   is unwired (next roadmap item). The window can't be driven yet.
+3. **No background on the main menu.** A render gap on the menu screen (background
+   absent while sprites/text show). Title + gameplay render fine, so it's screen-
+   specific — suspect a nametable-base / scroll / mode detail the renderer doesn't
+   yet handle on that screen. Needs investigation.
 
 ### Remaining
 
-1. **Oracle** (dev-only) — reference mode BUILT, diff analysis pending.
-   `--interp` (glue.c `glue_run_interp` + main.c) runs the WHOLE game under the
-   vendored superzazu Z80 over the SAME clean-room VDP/bus/IO, so a renderer bug
-   shows in both runs while a recomp bug shows only in `glue_run()`. Boots to the
-   title screen (`runner/interp_300.png`). NEXT: run `--interp` to a GHZ frame
-   and compare against the recomp PNG — if the reference shows the same garbage
-   strip it's a renderer bug, else a recomp bug (then byte-diff VRAM at the first
-   diverging frame). superzazu (MIT) is the only reference core used; no
-   third-party SMS emulator is bundled.
+1. ~~GHZ band~~ — **CONFIRMED correct ROM art** via Emulicious (see above); closed.
+   `--vdp-trace` + the VDP-write ring remain reusable for any future VRAM/CRAM bug.
 2. Statically resolve the 8 script-engine targets (multi-bank `[jump_tables]`)
    to shrink the hybrid's hot set — optional; the hybrid already covers them.
-3. **PSG** audio (clean-room `sn76489.c` exists; wire into `sms_io_out` + an
-   audio host); **input**; then **GG bring-up** (SonicBlastGG).
+3. **Input** (controller ports $DC/$DD; currently idle 0xFF), then **GG bring-up**
+   (SonicBlastGG — exercises the GG viewport crop, 12-bit CRAM, and PSG stereo $06
+   now plumbed). PSG per-channel stereo can be confirmed by ear there.
 
 ## ROMs — PRESENT and parser-verified
 

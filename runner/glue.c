@@ -19,6 +19,7 @@
 #include "video/sms_vdp.h"
 #include "external/superzazu/z80.h"
 #include "png_write.h"
+#include "audio/sn76489.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +60,53 @@ static uint32_t  g_fb[SMS_SCREEN_W * SMS_SCREEN_H];
 
 /* ---- live per-frame callback (SDL host) ---- */
 static int (*g_frame_cb)(const uint32_t *fb, int w, int h);
+
+/* ---- platform + audio ----
+ * g_is_gg gates the GG-only stereo register ($06). The PSG is advanced from
+ * advance_vdp() (the single VDP-timing choke point shared by the recomp,
+ * hybrid, and interp paths) so audio stays in lockstep with video on every
+ * path; g_psg_cyc tracks the absolute Z80 cycle already fed to the PSG.
+ * Synthesis only runs when an audio sink is attached, so headless oracle/diff
+ * runs pay nothing. The sink is handed interleaved-stereo frames each video
+ * frame (the SDL audio host or a WAV writer). */
+static bool      g_is_gg;
+static uint64_t  g_psg_cyc;
+static void    (*g_audio_sink)(const int16_t *stereo_frames, size_t frame_count);
+
+/* ---- per-frame VDP-state trace (oracle: query, don't probe) ----
+ * When enabled, every frame appends a hash of the FULL VDP state (VRAM, CRAM,
+ * registers) so a recomp run and an --interp reference run can be diffed
+ * frame-by-frame to find the FIRST frame whose VDP STATE (not pixels) diverges.
+ * That discriminates a renderer/shared bug (identical state, different pixels)
+ * from a CPU/recomp bug (state itself diverges) and is immune to the hybrid-
+ * overlap confound, since it compares actual machine state rather than output. */
+static FILE *g_vdp_trace;
+static uint64_t fnv1a64(const void *buf, size_t n){
+    const uint8_t *p = (const uint8_t*)buf;
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i=0;i<n;i++){ h ^= p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+/* ---- always-on VDP register/CRAM write ring (raster-effect probe) ----
+ * Every VDP register or CRAM write is recorded with the scanline it occurred
+ * on (PRINCIPLES #17: query the ring, never arm-then-probe). At the dump frame
+ * we replay the ring for the just-finished frame to see whether scroll (r8/r9)
+ * or palette (CRAM) change DURING active display (lines 0..191) - the signature
+ * of a per-scanline raster effect a full-frame-snapshot renderer cannot show.
+ * VRAM writes are deliberately not recorded (too high-volume; not needed). */
+#define SMS_VDPW_RING 8192
+static struct { uint32_t frame; int16_t line; uint8_t kind; uint16_t addr; uint8_t val; }
+                 g_vdpw[SMS_VDPW_RING];
+static uint32_t  g_vdpw_pos;
+static void vdp_write_obs(int kind, uint16_t addr, uint8_t value){
+    uint32_t i = g_vdpw_pos++ & (SMS_VDPW_RING - 1);
+    g_vdpw[i].frame = (uint32_t)g_frame;
+    g_vdpw[i].line  = (int16_t)g_vdp.line;
+    g_vdpw[i].kind  = (uint8_t)kind;
+    g_vdpw[i].addr  = addr;
+    g_vdpw[i].val   = value;
+}
 
 /* ---- dispatch misses ---- */
 static uint8_t  *g_miss_seen;        /* 64K dedup bitmap */
@@ -121,16 +169,36 @@ uint8_t sms_io_in(uint8_t p){
 }
 
 void sms_io_out(uint8_t p, uint8_t v){
-    if (p < 0x40) return;                                /* memory/IO control */
-    if (p < 0x80) return;                                /* PSG ($7F) - TODO wire sn76489 */
+    if (p < 0x40){                                       /* memory / GG system / IO control */
+        if (g_is_gg && p == 0x06) psg_write_stereo(v);   /* GG stereo routing register */
+        return;                                          /* $3E mem-control etc.: not modelled */
+    }
+    if (p < 0x80){ psg_write(v); return; }               /* PSG data ($40-$7F, canonically $7F) */
     if (p < 0xC0){ if (p & 1) vdp_control_write(v); else vdp_data_write(v); return; }
-    /* $C0-$FF: GG system / stereo ($06) - TODO */
-    (void)v;
+    (void)v;                                             /* $C0-$FF controllers: no output */
 }
 
 /* ====================== timing + interrupts ====================== */
 static void frame_completed(void){
     g_frame++;
+    if (g_audio_sink){
+        /* Drain this frame's PSG output to the sink (interleaved stereo). The
+         * PSG was advanced up to the current absolute cycle in advance_vdp(). */
+        int16_t buf[2048 * 2];
+        size_t n;
+        while ((n = psg_render(buf, 2048)) > 0) g_audio_sink(buf, n);
+    }
+    if (g_vdp_trace){
+        /* End-of-frame VDP state == what the renderer would consume for this
+         * frame. Hash each region separately so the diff says WHICH diverged. */
+        fprintf(g_vdp_trace, "%llu,%016llx,%016llx,%016llx,%02X,%02X,%02X,%02X\n",
+                (unsigned long long)g_frame,
+                (unsigned long long)fnv1a64(g_vdp.vram, sizeof g_vdp.vram),
+                (unsigned long long)fnv1a64(g_vdp.cram, sizeof g_vdp.cram),
+                (unsigned long long)fnv1a64(g_vdp.reg,  sizeof g_vdp.reg),
+                g_vdp.reg[8], g_vdp.reg[9], g_vdp.reg[0], g_vdp.reg[1]);
+        fflush(g_vdp_trace);
+    }
     if (g_dump_path && g_frame == g_dump_frame){
         int nz_vram=0, nz_cram=0;
         for (int i=0;i<0x4000;i++) if (g_vdp.vram[i]) nz_vram++;
@@ -142,6 +210,85 @@ static void frame_completed(void){
             g_vdp.reg[0],g_vdp.reg[1],g_vdp.reg[2],g_vdp.reg[5],g_vdp.reg[6],
             g_vdp.reg[7],g_vdp.reg[8],g_vdp.reg[9],g_vdp.reg[10],
             nz_vram, nz_cram, g_vdp.line);
+        {   /* one-shot renderer diagnostic (not a hot path): the BG nametable
+             * tile-index grid + the y->row mapping the renderer computes, so we
+             * can see exactly what rows the "garbage band" reads. */
+            int nt_base = (g_vdp.reg[2] & 0x0E) << 10;
+            int vs = g_vdp.reg[9];
+            fprintf(stderr, "[nt] base=%04X vscroll=%d  y->row map (192-line, %%224):\n", nt_base, vs);
+            for (int y=0; y<SMS_SCREEN_H; y+=8){
+                int by = (y + vs) % 224;
+                fprintf(stderr, "  y=%3d by=%3d row=%2d\n", y, by, by>>3);
+            }
+            fprintf(stderr, "[nt] horizon rows 0..9 FULL entries (T=tile P=pal bit11 R=prio bit12):\n");
+            for (int row=0; row<10; row++){
+                fprintf(stderr, "  r%02d:", row);
+                for (int col=0; col<16; col++){
+                    int ea = (nt_base + (row*32 + col)*2) & 0x3FFF;
+                    int entry = g_vdp.vram[ea] | (g_vdp.vram[ea+1] << 8);
+                    fprintf(stderr, " %03X%c%c", entry & 0x1FF,
+                            (entry & 0x800)?'P':'.', (entry & 0x1000)?'R':'.');
+                }
+                fprintf(stderr, "\n");
+            }
+            /* Decode a few suspect horizon tiles as 8x8 palette-index art so we
+             * can see whether the pattern is a coherent shape and which colour
+             * indices it uses (high indices -> upper half of the sub-palette). */
+            fprintf(stderr, "[cram] 32 entries (idx: raw -> R,G,B 0..3):\n");
+            for (int e=0;e<32;e++){
+                uint8_t c = g_vdp.cram[e & 0x1F];
+                fprintf(stderr, "  %2d: %02X -> %d,%d,%d%s", e, c,
+                        c&3,(c>>2)&3,(c>>4)&3,
+                        (e==15)?"\n":(e%4==3?"\n":"   "));
+            }
+            int suspects[] = {0x0FC,0x0FD,0x0FE,0x0FF,0x07B,0x08C};
+            for (unsigned s=0; s<sizeof suspects/sizeof suspects[0]; s++){
+                int t = suspects[s];
+                fprintf(stderr, "[tile %03X] pattern (palette index 0..F per pixel):\n", t);
+                for (int py=0; py<8; py++){
+                    const uint8_t *p = &g_vdp.vram[((t*32)+py*4) & 0x3FFF];
+                    fprintf(stderr, "   ");
+                    for (int px=0; px<8; px++){
+                        int bit=7-px;
+                        int c=((p[0]>>bit)&1)|(((p[1]>>bit)&1)<<1)|(((p[2]>>bit)&1)<<2)|(((p[3]>>bit)&1)<<3);
+                        fprintf(stderr, "%X", c);
+                    }
+                    fprintf(stderr, "\n");
+                }
+            }
+        }
+        {   /* Replay the VDP-write ring for the just-finished frame: do scroll
+             * (r8/r9) or palette (CRAM) change DURING active display (lines
+             * 0..191)? That is the signature of a raster effect this snapshot
+             * renderer cannot reproduce. Writes are tagged with g_frame as it
+             * was DURING the frame, which is g_frame-1 now (incremented above). */
+            uint32_t target = (uint32_t)(g_frame - 1);
+            int a_r8=0, a_r9=0, a_cram=0, a_other=0, vbl=0, total=0, printed=0;
+            uint32_t span = g_vdpw_pos < SMS_VDPW_RING ? g_vdpw_pos : SMS_VDPW_RING;
+            fprintf(stderr, "[vdpw] active-display reg/CRAM writes in frame %u "
+                    "(line 0..191):\n", target);
+            for (uint32_t i=0;i<span;i++){
+                uint32_t idx = (g_vdpw_pos - span + i) & (SMS_VDPW_RING - 1);
+                if (g_vdpw[idx].frame != target) continue;
+                total++;
+                int ln = g_vdpw[idx].line;
+                int active = (ln >= 0 && ln <= 191);
+                if (!active){ vbl++; continue; }
+                if (g_vdpw[idx].kind == VDPW_REG){
+                    int rg = g_vdpw[idx].addr;
+                    if (rg==8) a_r8++; else if (rg==9) a_r9++; else a_other++;
+                } else a_cram++;
+                if (printed < 200){
+                    printed++;
+                    fprintf(stderr, "   line %3d %s %02X = %02X\n", ln,
+                            g_vdpw[idx].kind==VDPW_REG?"REG ":"CRAM",
+                            g_vdpw[idx].addr, g_vdpw[idx].val);
+                }
+            }
+            fprintf(stderr, "[vdpw] frame %u: total reg/cram writes=%d (vblank=%d) | "
+                    "ACTIVE r8=%d r9=%d cram=%d otherReg=%d\n",
+                    target, total, vbl, a_r8, a_r9, a_cram, a_other);
+        }
 #ifdef SMS_TRACE_PC
         fprintf(stderr, "[vdp] lastPC=%04X  IRQ-interrupted main PC=%04X  "
                 "IY=%04X IX=%04X SP=%04X iff1=%d\n",
@@ -189,6 +336,14 @@ static void take_irq(void){
  * frame_completed() at each frame boundary. Shared by sms_sync (recompiled
  * path) and the hybrid interpreter so both drive video timing identically. */
 static void advance_vdp(uint64_t cyc){
+    /* Keep the PSG in lockstep with the VDP on the same absolute timeline.
+     * Only synthesise when a sink is listening (oracle/diff runs pay nothing).
+     * Done before stepping lines so the just-finished frame's samples are
+     * available when frame_completed() drains. */
+    if (g_audio_sink && cyc > g_psg_cyc){
+        psg_advance((uint32_t)(cyc - g_psg_cyc));
+        g_psg_cyc = cyc;
+    }
     while (cyc >= g_next_line_cyc){
         vdp_step_line();
         g_next_line_cyc += SMS_CYC_PER_LINE;
@@ -388,7 +543,12 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     free(g_miss_seen);
     g_miss_seen = (uint8_t*)calloc(0x10000, 1);
     remove(g_miss_path);                 /* fresh log per run */
+    g_is_gg = is_gg;
     vdp_reset(is_gg);
+    g_vdpw_pos = 0;
+    vdp_set_write_observer(vdp_write_obs);   /* always-on raster probe */
+    psg_init();                          /* fresh PSG state */
+    g_psg_cyc = 0;
 }
 
 void glue_run_interp(void){
@@ -430,7 +590,22 @@ void glue_run(void){
 }
 
 void     glue_set_dump(uint64_t frame, const char *path){ g_dump_frame = frame; g_dump_path = path; }
+void     glue_set_vdp_trace(const char *path){
+    if (g_vdp_trace){ fclose(g_vdp_trace); g_vdp_trace = NULL; }
+    if (path){
+        g_vdp_trace = fopen(path, "w");
+        if (g_vdp_trace)
+            fprintf(g_vdp_trace, "frame,vram_h,cram_h,reg_h,r8,r9,r0,r1\n");
+        else
+            fprintf(stderr, "[runner] cannot open vdp-trace %s\n", path);
+    }
+}
 void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h)){ g_frame_cb = cb; }
+void     glue_set_audio_sink(void (*sink)(const int16_t *stereo_frames, size_t frame_count)){
+    g_audio_sink = sink;
+    g_psg_cyc = g_z80.cyc;   /* start metering audio from "now" */
+}
+uint32_t glue_audio_sample_rate(void){ return psg_sample_rate(); }
 uint64_t glue_frame_count(void){ return g_frame; }
 int      glue_dispatch_miss_count(void){ return g_miss_count; }
 size_t   glue_rom_size(void){ return g_rom_size; }
