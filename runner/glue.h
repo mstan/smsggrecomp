@@ -42,6 +42,28 @@ void     glue_set_vdp_trace(const char *path);
  * loop then unwinds cleanly, as on the frame limit). Keeps glue.c host-agnostic. */
 void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h));
 
+/* Controller buttons (1 = pressed). The D-pad + two face buttons map to the
+ * SMS controller ports $DC/$DD; START is the Game Gear's port-$00 bit-7 button
+ * (the SMS Pause button is a separate NMI, not a controller bit). */
+enum {
+    SMS_PAD_UP    = 0x01, SMS_PAD_DOWN  = 0x02,
+    SMS_PAD_LEFT  = 0x04, SMS_PAD_RIGHT = 0x08,
+    SMS_PAD_B1    = 0x10, SMS_PAD_B2    = 0x20,
+    SMS_PAD_START = 0x40
+};
+
+/* Set the live controller state for player 1 / 2 (an SMS_PAD_* bitmask). The
+ * SDL host refreshes these from the keyboard each frame; headless runs leave
+ * them 0, so the ports read idle. */
+void     glue_set_pad1(uint8_t pressed);
+void     glue_set_pad2(uint8_t pressed);
+
+/* Headless scripted input: when set, the runner calls this once per completed
+ * frame to fetch player-1's mask for the upcoming frame — deterministic input
+ * for automated tests, no window required. The SDL host uses glue_set_pad1()
+ * instead. Pass NULL to disable. */
+void     glue_set_input_cb(uint8_t (*cb)(uint64_t frame));
+
 /* Register an audio sink. When set, the PSG is synthesised in lockstep with
  * the VDP (on every run path) and each completed video frame's output is
  * handed to `sink` as interleaved-stereo S16 frames (L,R per frame) at
@@ -49,6 +71,11 @@ void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h));
  * oracle/diff runs synthesise nothing). */
 void     glue_set_audio_sink(void (*sink)(const int16_t *stereo_frames, size_t frame_count));
 uint32_t glue_audio_sample_rate(void);
+
+/* The emulated frame rate in Hz (NTSC: Z80 clock / cycles-per-frame ≈ 59.92).
+ * The SDL host uses it to pace the window to realtime independent of the
+ * monitor's refresh. */
+double   glue_frame_rate(void);
 
 uint64_t glue_frame_count(void);
 int      glue_dispatch_miss_count(void);

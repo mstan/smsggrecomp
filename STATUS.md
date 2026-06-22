@@ -294,19 +294,39 @@ The clean-room SN76489 is now wired end-to-end and producing recognisable music.
   correct). The `--interp` oracle path produces the same. Both builds warning-clean.
   **Awaits user listen-test (#23) for the by-ear confirmation.**
 
-### Known issues — observed in the first live window run (2026-06-21, user)
+### Controller input + frame pacing — DONE (2026-06-22; `dev/input` → main)
 
-Watching the windowed build run live surfaced behavioural issues. None block this
-checkpoint (the recomp + audio core is sound); captured here as dev targets:
+Live-window I/O bring-up (both live in the SDL host loop, so kept together):
 
-1. **Speed/timing way off — the attract demo runs too fast.** Prime suspect: the
-   SDL host paces the loop purely on `SDL_RENDERER_PRESENTVSYNC` (host_present
-   blocks to vsync), so on a >60 Hz display the game runs at `refresh/60 ×`
-   realtime (e.g. 120 Hz → 2×). Needs a real 60 fps cap (wall-clock or audio-buffer
-   paced) independent of monitor refresh. Not caused by the audio wiring (that only
-   synthesises; pacing is unchanged). NOT yet diagnosed/confirmed.
-2. **No input.** Expected — controller ports $DC/$DD still return idle 0xFF; input
-   is unwired (next roadmap item). The window can't be driven yet.
+- **Controller input.** `glue.c` serves real state on `$DC`/`$DD` (P1 D-pad +
+  buttons + P2 up/down, active-low) and GG **START** on port `$00` bit 7, all read
+  through the single `sms_io_in` (so input reaches the recomp AND hybrid/interp
+  paths). The SDL host maps keyboard → P1 mask (arrows / Z=B1 / X=B2 / Enter=Start
+  / Esc=quit) and `main.c` bridges it to `glue_set_pad1()` each frame; headless
+  stays idle (`0xFF`). Verified headlessly via a new `--press FRAME:KEYS` scripted-
+  input hook: a no-input vs button-held run is byte-identical through the press,
+  then the VDP state diverges 2 frames later and stays diverged — the game
+  demonstrably responds. `SMS_PAD_*` bits + `glue_set_pad1/2` + `glue_set_input_cb`.
+- **Frame pacing.** The window paced purely on vsync, so it ran at `refresh/60 ×`
+  (2× on a 120 Hz display — the "too fast / time way off" report). Replaced with a
+  precise wall-clock deadline limiter (`host_set_frame_cap`, drift-free advance
+  model, coarse `SDL_Delay` + spin) locked to `glue_frame_rate()` (NTSC 59.92 fps);
+  PRESENTVSYNC dropped so speed is independent of monitor refresh. Verified:
+  marginal 60.2 fps over 600 frames (was unbounded). Also fixes the audio queue
+  growth that 2× playback caused. Tradeoff: possible tearing without vsync
+  (cosmetic; revisit with audio-driven sync later).
+
+### Recomp-vs-hybrid execution split — INSTRUMENTED
+
+`glue.c` now accumulates the Z80 cycles each dispatch-miss spends in the superzazu
+interpreter (`g_hybrid_cyc` / `g_hybrid_calls`) and prints an `[exec]` line at
+shutdown: `hybrid calls, N of M Z80 cyc = X% interp / Y% static`. Always-on, cheap.
+See the measured numbers in DEBUG/handoff notes.
+
+### Known issues — from the first live window runs (2026-06-21/22, user)
+
+1. ~~Speed/timing too fast~~ — **FIXED** (wall-clock 60 fps cap; see above).
+2. ~~No input~~ — **FIXED** (controller wired; see above).
 3. **No background on the main menu.** A render gap on the menu screen (background
    absent while sprites/text show). Title + gameplay render fine, so it's screen-
    specific — suspect a nametable-base / scroll / mode detail the renderer doesn't
@@ -316,11 +336,13 @@ checkpoint (the recomp + audio core is sound); captured here as dev targets:
 
 1. ~~GHZ band~~ — **CONFIRMED correct ROM art** via Emulicious (see above); closed.
    `--vdp-trace` + the VDP-write ring remain reusable for any future VRAM/CRAM bug.
-2. Statically resolve the 8 script-engine targets (multi-bank `[jump_tables]`)
-   to shrink the hybrid's hot set — optional; the hybrid already covers them.
-3. **Input** (controller ports $DC/$DD; currently idle 0xFF), then **GG bring-up**
-   (SonicBlastGG — exercises the GG viewport crop, 12-bit CRAM, and PSG stereo $06
-   now plumbed). PSG per-channel stereo can be confirmed by ear there.
+2. Statically resolve the script-engine dispatch-miss targets (multi-bank
+   `[jump_tables]`) to shrink the hybrid's hot set — optional; the hybrid covers
+   them. Interactive play exercises more of them than headless attract (16 vs 8
+   distinct misses in the first live session), so the hybrid's static-resolution
+   backlog grows as more screens are reached — see the `[exec]` interp/static split.
+3. **Main-menu background** (`dev/menu-bg`), then **GG bring-up** (SonicBlastGG —
+   exercises the GG viewport crop, 12-bit CRAM, and PSG stereo $06 now plumbed).
 
 ## ROMs — PRESENT and parser-verified
 

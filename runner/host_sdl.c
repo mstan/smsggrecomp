@@ -2,15 +2,18 @@
  * host_sdl.c - SDL2 live display host (built only with -DSMS_HAVE_SDL).
  *
  * A streaming ARGB8888 texture is updated from the runner's framebuffer each
- * frame and presented with vsync, which also paces the game loop. We take the
- * Z80/VDP framebuffer as-is (full 256x192) and crop to the platform viewport
- * (SMS = full, GG = 160x144 centred) via the RenderCopy source rect.
+ * frame and presented. The loop is paced by a precise wall-clock frame limiter
+ * (host_set_frame_cap) locked to the emulated frame rate, NOT by vsync — vsync
+ * paces to the monitor's refresh, which runs the game too fast on >60 Hz
+ * displays. We take the Z80/VDP framebuffer as-is (full 256x192) and crop to the
+ * platform viewport (SMS = full, GG = 160x144 centred) via the RenderCopy rect.
  *
  * SDL_MAIN_HANDLED keeps our own main() (no SDL2main / WinMain shim needed).
  */
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include "host_sdl.h"
+#include "glue.h"       /* SMS_PAD_* bit constants (the controller contract) */
 
 #include <stdio.h>
 
@@ -35,9 +38,10 @@ bool host_init(int fb_w, int fb_h,
                              crop_w * scale, crop_h * scale, SDL_WINDOW_SHOWN);
     if (!g_win){ fprintf(stderr, "[host] CreateWindow: %s\n", SDL_GetError()); return false; }
 
-    g_ren = SDL_CreateRenderer(g_win, -1,
-                               SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!g_ren)  /* fall back to software if no accelerated/vsync renderer */
+    /* No PRESENTVSYNC: the wall-clock limiter (host_set_frame_cap) owns pacing,
+     * so the game speed is independent of the monitor's refresh rate. */
+    g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);
+    if (!g_ren)  /* fall back to software if no accelerated renderer */
         g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
     if (!g_ren){ fprintf(stderr, "[host] CreateRenderer: %s\n", SDL_GetError()); return false; }
 
@@ -50,20 +54,77 @@ bool host_init(int fb_w, int fb_h,
     return true;
 }
 
+/* Keyboard -> SMS controller. Arrows = D-pad, Z/X = buttons 1/2 (Sonic: jump),
+ * Enter = Start (Game Gear). Esc quits. */
+static uint8_t g_pad;     /* live P1 mask (SMS_PAD_*) */
+
+static uint8_t key_to_pad(SDL_Keycode k){
+    switch (k){
+        case SDLK_UP:     return SMS_PAD_UP;
+        case SDLK_DOWN:   return SMS_PAD_DOWN;
+        case SDLK_LEFT:   return SMS_PAD_LEFT;
+        case SDLK_RIGHT:  return SMS_PAD_RIGHT;
+        case SDLK_z:      return SMS_PAD_B1;
+        case SDLK_x:      return SMS_PAD_B2;
+        case SDLK_RETURN: return SMS_PAD_START;
+        default:          return 0;
+    }
+}
+
+uint8_t host_get_pad1(void){ return g_pad; }
+
+/* ---- wall-clock frame limiter ----
+ * Deadline-advance model: the deadline moves forward by exactly one frame period
+ * each present, so the long-term rate is drift-free. We coarse-sleep (SDL_Delay)
+ * to ~1 ms before the deadline, then spin the remainder for sub-ms precision. */
+static double   g_perf_freq;
+static double   g_period_counts;   /* frame period in perf-counter units; 0 = uncapped */
+static uint64_t g_deadline;        /* perf-counter time this frame should end */
+
+void host_set_frame_cap(double fps){
+    g_perf_freq     = (double)SDL_GetPerformanceFrequency();
+    g_period_counts = (fps > 0.0) ? g_perf_freq / fps : 0.0;
+    g_deadline      = 0;           /* re-anchored on the next present */
+}
+
+static void host_pace(void){
+    if (g_period_counts <= 0.0) return;
+    uint64_t now = SDL_GetPerformanceCounter();
+    if (g_deadline == 0) g_deadline = now;                 /* first frame: anchor */
+    g_deadline += (uint64_t)g_period_counts;
+    /* If we fell far behind (debugger pause, hitch), resync instead of bursting
+     * to catch up. */
+    if (now > g_deadline + (uint64_t)(g_period_counts * 4.0))
+        g_deadline = now + (uint64_t)g_period_counts;
+    for (;;){
+        now = SDL_GetPerformanceCounter();
+        if (now >= g_deadline) break;
+        double remain_ms = (double)(g_deadline - now) * 1000.0 / g_perf_freq;
+        if (remain_ms > 2.0) SDL_Delay((uint32_t)(remain_ms - 1.0));   /* else spin */
+    }
+}
+
 bool host_present(const uint32_t *fb, int fb_w, int fb_h){
     if (!g_tex) return false;
     SDL_UpdateTexture(g_tex, NULL, fb, fb_w * (int)sizeof(uint32_t));
     SDL_RenderClear(g_ren);
     SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
-    SDL_RenderPresent(g_ren);   /* blocks to vsync, pacing the loop */
+    SDL_RenderPresent(g_ren);
     (void)fb_h;
 
     bool quit = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)){
         if (e.type == SDL_QUIT) quit = true;
-        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) quit = true;
+        else if (e.type == SDL_KEYDOWN){
+            if (e.key.keysym.sym == SDLK_ESCAPE) quit = true;
+            else g_pad |= key_to_pad(e.key.keysym.sym);
+        } else if (e.type == SDL_KEYUP){
+            g_pad &= (uint8_t)~key_to_pad(e.key.keysym.sym);
+        }
     }
+
+    host_pace();      /* hold the loop to realtime (display-refresh-independent) */
     return !quit;
 }
 

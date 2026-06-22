@@ -23,7 +23,9 @@
 /* Bridge the runner's per-frame callback to the SDL host. Returns nonzero to
  * request shutdown (glue.c then unwinds the run loop). */
 static int sdl_frame_cb(const uint32_t *fb, int w, int h){
-    return host_present(fb, w, h) ? 0 : 1;
+    bool keep = host_present(fb, w, h);
+    glue_set_pad1(host_get_pad1());     /* push this frame's keyboard state to the CPU */
+    return keep ? 0 : 1;
 }
 #endif
 
@@ -76,6 +78,45 @@ static void audio_sink(const int16_t *frames, size_t n){
 #endif
 }
 
+/* ---- headless scripted input (--press FRAME:KEYS, repeatable) ----
+ * KEYS letters: U D L R (d-pad), A=button1, B=button2, S=start; empty = release.
+ * Each directive sets player 1's held buttons from its frame until a later one.
+ * Deterministic input for automated tests — no window needed. */
+static struct { uint64_t frame; uint8_t mask; } g_press[32];
+static int g_press_n;
+
+static uint8_t press_keys_to_mask(const char *s){
+    uint8_t m = 0;
+    for (; *s; s++){
+        switch (*s){
+            case 'U': case 'u': m|=SMS_PAD_UP;    break;
+            case 'D': case 'd': m|=SMS_PAD_DOWN;  break;
+            case 'L': case 'l': m|=SMS_PAD_LEFT;  break;
+            case 'R': case 'r': m|=SMS_PAD_RIGHT; break;
+            case 'A': case 'a': m|=SMS_PAD_B1;    break;
+            case 'B': case 'b': m|=SMS_PAD_B2;    break;
+            case 'S': case 's': m|=SMS_PAD_START; break;
+            default: break;   /* ignore separators */
+        }
+    }
+    return m;
+}
+static void press_add(const char *tok){
+    if (g_press_n >= (int)(sizeof g_press / sizeof g_press[0])) return;
+    const char *colon = strchr(tok, ':');
+    g_press[g_press_n].frame = strtoull(tok, NULL, 0);
+    g_press[g_press_n].mask  = press_keys_to_mask(colon ? colon+1 : "");
+    g_press_n++;
+}
+static uint8_t press_provider(uint64_t frame){
+    uint8_t m = 0; uint64_t best = 0; int found = 0;
+    for (int i = 0; i < g_press_n; i++)
+        if (g_press[i].frame <= frame && (!found || g_press[i].frame >= best)){
+            best = g_press[i].frame; m = g_press[i].mask; found = 1;
+        }
+    return m;   /* the latest directive at/under the current frame wins */
+}
+
 static int ci_cmp(const char *a, const char *b){
     for (; *a && *b; a++, b++){
         int ca=*a, cb=*b;
@@ -115,6 +156,7 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--interp")==0) interp = true;
         else if (strcmp(argv[i],"--audio-wav")==0 && i+1<argc) audio_wav = argv[++i];
         else if (strcmp(argv[i],"--mute")==0) mute = true;
+        else if (strcmp(argv[i],"--press")==0 && i+1<argc) press_add(argv[++i]);
         else if (strcmp(argv[i],"--window")==0){
             want_window = true;
             if (i+1<argc && argv[i+1][0] != '-') win_scale = (int)strtol(argv[++i],NULL,0);
@@ -124,7 +166,8 @@ int main(int argc, char **argv){
     }
     if (!rom){
         fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms] "
-                       "[--window [scale]] [--audio-wav out.wav] [--mute] [--interp]\n", argv[0]);
+                       "[--window [scale]] [--audio-wav out.wav] [--mute] "
+                       "[--press FRAME:KEYS] [--interp]\n", argv[0]);
         return 2;
     }
 
@@ -143,6 +186,10 @@ int main(int argc, char **argv){
     glue_init(is_gg, frames);
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
+    if (g_press_n){
+        glue_set_input_cb(press_provider);
+        fprintf(stderr,"[runner] scripted input: %d directive(s)\n", g_press_n);
+    }
 
     if (want_window){
         (void)win_scale;   /* used only in the SDL block below */
@@ -153,9 +200,10 @@ int main(int argc, char **argv){
         int cw = is_gg ? GG_SCREEN_W : SMS_SCREEN_W;
         int ch = is_gg ? GG_SCREEN_H : SMS_SCREEN_H;
         if (host_init(SMS_SCREEN_W, SMS_SCREEN_H, cx, cy, cw, ch, win_scale,
-                      is_gg ? "Sonic (GG) - recompiled" : "Sonic 1 (SMS) - recompiled"))
+                      is_gg ? "Sonic (GG) - recompiled" : "Sonic 1 (SMS) - recompiled")){
             glue_set_frame_callback(sdl_frame_cb);
-        else
+            host_set_frame_cap(glue_frame_rate());   /* realtime, refresh-independent */
+        } else
             fprintf(stderr,"[runner] SDL window init failed; running headless\n");
 #else
         fprintf(stderr,"[runner] --window requested but built without SDL "

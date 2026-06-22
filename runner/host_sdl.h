@@ -21,10 +21,16 @@ bool host_init(int fb_w, int fb_h,
                int crop_x, int crop_y, int crop_w, int crop_h,
                int scale, const char *title);
 
-/* Upload `fb` (fb_w*fb_h ARGB8888), draw, present (vsync), and pump events.
- * Returns true to keep running, false if the user requested quit (window
- * close / Esc). */
+/* Upload `fb` (fb_w*fb_h ARGB8888), draw, present, pump events, and pace the
+ * loop to the frame cap (see host_set_frame_cap). Returns true to keep running,
+ * false if the user requested quit (window close / Esc). */
 bool host_present(const uint32_t *fb, int fb_w, int fb_h);
+
+/* Cap the present loop to `fps` frames/sec using a precise wall-clock limiter,
+ * so the game runs at realtime regardless of the monitor's refresh rate. Pass 0
+ * to disable (uncapped). Without this the loop would run as fast as the display
+ * refreshes (e.g. 2x on a 120 Hz monitor). */
+void host_set_frame_cap(double fps);
 
 void host_shutdown(void);
 
@@ -39,5 +45,10 @@ bool host_audio_init(uint32_t src_rate);
 void host_audio_submit(const int16_t *stereo_frames, size_t frame_count);
 
 void host_audio_shutdown(void);
+
+/* Current player-1 controller state as an SMS_PAD_* bitmask (1 = pressed),
+ * built from the keyboard in host_present(). main.c bridges this into glue via
+ * glue_set_pad1() each frame, keeping the host free of glue calls. */
+uint8_t host_get_pad1(void);
 
 #endif /* HOST_SDL_H */

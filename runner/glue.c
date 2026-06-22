@@ -53,6 +53,14 @@ static uint64_t  g_irq_reentrant;   /* take_irq calls that fired inside the ISR 
 static int       g_sync_depth;
 static int       g_sync_maxdepth;
 
+/* ---- recomp-vs-hybrid execution split (always-on) ----
+ * Every dispatch miss runs the routine under the superzazu interpreter. We
+ * accumulate the Z80 cycles each such call consumes; comparing that to total
+ * Z80 cycles (g_z80.cyc) gives the fraction of emulated time spent in the
+ * interpreter fallback vs the statically-recompiled code. */
+static uint64_t  g_hybrid_cyc;      /* Z80 cycles executed inside hybrid_interpret */
+static uint64_t  g_hybrid_calls;    /* number of hybrid invocations */
+
 /* ---- frame dump ---- */
 static uint64_t  g_dump_frame = (uint64_t)-1;
 static const char *g_dump_path;
@@ -72,6 +80,12 @@ static int (*g_frame_cb)(const uint32_t *fb, int w, int h);
 static bool      g_is_gg;
 static uint64_t  g_psg_cyc;
 static void    (*g_audio_sink)(const int16_t *stereo_frames, size_t frame_count);
+
+/* ---- input ---- live controller masks (SMS_PAD_* bits, 1 = pressed). Driven
+ * by the host each frame; read (active-low) by sms_io_in. Both run paths read
+ * through the same sms_io_in, so input reaches recomp and hybrid/interp alike. */
+static uint8_t   g_pad1, g_pad2;
+static uint8_t (*g_input_cb)(uint64_t frame);   /* headless scripted input */
 
 /* ---- per-frame VDP-state trace (oracle: query, don't probe) ----
  * When enabled, every frame appends a hash of the FULL VDP state (VRAM, CRAM,
@@ -162,10 +176,35 @@ int sms_slot_bank(uint16_t addr){
 }
 
 uint8_t sms_io_in(uint8_t p){
-    if (p < 0x40) return 0xFF;                           /* control / GG ports */
+    if (p < 0x40){                                       /* control / GG system ports */
+        if (g_is_gg && p == 0x00)                        /* GG START on bit7 (active low) */
+            return (uint8_t)(0xFF ^ ((g_pad1 & SMS_PAD_START) ? 0x80 : 0x00));
+        return 0xFF;
+    }
     if (p < 0x80) return (p & 1) ? vdp_hcounter() : vdp_vcounter();
     if (p < 0xC0) return (p & 1) ? vdp_status_read() : vdp_data_read();
-    return 0xFF;                                         /* controllers idle */
+    /* $C0-$FF controller ports, active low (0 = pressed). Even ($DC) = P1 D-pad
+     * + buttons + P2 up/down; odd ($DD) = P2 left/right/buttons + reset/TH
+     * (idle high). */
+    if (p & 1){
+        uint8_t b = 0xFF;                                /* $DD */
+        if (g_pad2 & SMS_PAD_LEFT)  b &= (uint8_t)~0x01;
+        if (g_pad2 & SMS_PAD_RIGHT) b &= (uint8_t)~0x02;
+        if (g_pad2 & SMS_PAD_B1)    b &= (uint8_t)~0x04;
+        if (g_pad2 & SMS_PAD_B2)    b &= (uint8_t)~0x08;
+        return b;                                        /* bit4 reset, bit6/7 TH: not pressed */
+    } else {
+        uint8_t b = 0xFF;                                /* $DC */
+        if (g_pad1 & SMS_PAD_UP)    b &= (uint8_t)~0x01;
+        if (g_pad1 & SMS_PAD_DOWN)  b &= (uint8_t)~0x02;
+        if (g_pad1 & SMS_PAD_LEFT)  b &= (uint8_t)~0x04;
+        if (g_pad1 & SMS_PAD_RIGHT) b &= (uint8_t)~0x08;
+        if (g_pad1 & SMS_PAD_B1)    b &= (uint8_t)~0x10;
+        if (g_pad1 & SMS_PAD_B2)    b &= (uint8_t)~0x20;
+        if (g_pad2 & SMS_PAD_UP)    b &= (uint8_t)~0x40;
+        if (g_pad2 & SMS_PAD_DOWN)  b &= (uint8_t)~0x80;
+        return b;
+    }
 }
 
 void sms_io_out(uint8_t p, uint8_t v){
@@ -181,6 +220,7 @@ void sms_io_out(uint8_t p, uint8_t v){
 /* ====================== timing + interrupts ====================== */
 static void frame_completed(void){
     g_frame++;
+    if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
     if (g_audio_sink){
         /* Drain this frame's PSG output to the sink (interleaved stereo). The
          * PSG was advanced up to the current absolute cycle in advance_vdp(). */
@@ -472,6 +512,8 @@ static void hybrid_interpret(uint16_t addr){
     }
     state_from_hz();
     g_z80.cyc = base + g_hz.cyc;         /* reapply rebased absolute time */
+    g_hybrid_cyc += g_hz.cyc;            /* cycles this routine spent in the interpreter */
+    g_hybrid_calls++;
 }
 
 /* ====================== dispatch miss ====================== */
@@ -549,6 +591,8 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     vdp_set_write_observer(vdp_write_obs);   /* always-on raster probe */
     psg_init();                          /* fresh PSG state */
     g_psg_cyc = 0;
+    g_pad1 = g_pad2 = 0;                  /* controllers idle */
+    g_hybrid_cyc = g_hybrid_calls = 0;
 }
 
 void glue_run_interp(void){
@@ -587,6 +631,12 @@ void glue_run(void){
             (unsigned long long)g_irq_reentrant,
             g_frame ? (double)g_irq_taken / (double)g_frame : 0.0,
             g_sync_maxdepth);
+    fprintf(stderr, "[exec] hybrid(interp): %llu calls, %llu of %llu Z80 cyc = "
+            "%.3f%% interp / %.3f%% static\n",
+            (unsigned long long)g_hybrid_calls,
+            (unsigned long long)g_hybrid_cyc, (unsigned long long)g_z80.cyc,
+            g_z80.cyc ? 100.0 * (double)g_hybrid_cyc / (double)g_z80.cyc : 0.0,
+            g_z80.cyc ? 100.0 * (double)(g_z80.cyc - g_hybrid_cyc) / (double)g_z80.cyc : 0.0);
 }
 
 void     glue_set_dump(uint64_t frame, const char *path){ g_dump_frame = frame; g_dump_path = path; }
@@ -606,6 +656,10 @@ void     glue_set_audio_sink(void (*sink)(const int16_t *stereo_frames, size_t f
     g_psg_cyc = g_z80.cyc;   /* start metering audio from "now" */
 }
 uint32_t glue_audio_sample_rate(void){ return psg_sample_rate(); }
+double   glue_frame_rate(void){ return (double)SMS_Z80_HZ / (double)SMS_CYC_PER_FRAME; }
+void     glue_set_pad1(uint8_t pressed){ g_pad1 = pressed; }
+void     glue_set_pad2(uint8_t pressed){ g_pad2 = pressed; }
+void     glue_set_input_cb(uint8_t (*cb)(uint64_t frame)){ g_input_cb = cb; }
 uint64_t glue_frame_count(void){ return g_frame; }
 int      glue_dispatch_miss_count(void){ return g_miss_count; }
 size_t   glue_rom_size(void){ return g_rom_size; }
