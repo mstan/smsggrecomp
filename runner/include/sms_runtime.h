@@ -37,6 +37,9 @@ typedef struct {
     bool     iff1, iff2;
     uint8_t  im;            /* interrupt mode 0/1/2 */
     bool     halted;
+    uint8_t  ei_block;      /* EI just executed: block one maskable-IRQ accept slot
+                             * (Z80 accepts no IRQ until after the instruction
+                             * following EI). Set by EI, cleared after one insn. */
 
     uint64_t cyc;           /* T-state accumulator (drives line/frame timing) */
 } Z80State;
@@ -106,6 +109,7 @@ int  sms_slot_bank(uint16_t addr);
 static inline void sms_tick(uint8_t n){
     g_z80.cyc += n;
     if (g_z80.cyc >= g_sync_deadline) sms_sync();
+    g_z80.ei_block = 0;   /* the EI-delay covers exactly one instruction boundary */
 }
 
 /* ---- always-on function-entry ring (PRINCIPLES #17) ---------------------- *

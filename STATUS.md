@@ -382,22 +382,49 @@ UNCHANGED** (131 funcs, 0 truncated, irq/frame 1.00, 8 misses — detector fires
 0 tables there; its TOML/computed-call paths still cover it). No regression to
 the validated SMS baseline.
 
-### KNOWN REGRESSION (open) — Sonic Blast render breaks ~frame 264
+### Interrupt-sampling / timing-model fix — DONE (3 parts; ChatGPT-designed)
 
-Recompiling the main loop **exposed a latent recomp divergence** (NOT a
-jump-table-logic bug per se): game RAM matches the `--interp` oracle byte-for-byte
-through frame 236, then a title-state handler cluster (`0x4Fxx–0x53xx`, active
-from frame 237) computes wrong values (a buffer at `$DB04` fills `$0222` where the
-oracle has `$0111`; a counter at `$D131` is off by one), which feed an `$8000`
-hybrid buffer-fill and corrupt RAM/VRAM → the title renders white by frame 900.
-First VRAM divergence frame 203 (one byte `$0AC2`), first *persistent* RAM
-divergence frame 237. The CPU logic is otherwise correct (RAM matches until 237).
-**Next step:** bisect the `0x4Fxx–0x53xx` cluster — compare recomp vs interp
-register state at the cluster entry, or audit its generated C for a mistranslated
-instruction. Reusable instruments built this session: raw VRAM/RAM dumps
-(`<png>.vram`/`.ram`), env-armed VRAM/RAM write watches (`SMS_VRAM_WATCH` /
-`SMS_RAM_WATCH` + `_FRAME`, `-DSMS_TRACE_PC`), per-table jt log, RAM hash column
-in `--vdp-trace`.
+Recompiling the main loop exposed that the recompiled CPU path had a different
+**interrupt-sampling contract** than the interp/hybrid (conferred with ChatGPT,
+SMS thread; see [[timing-model-irq-sampling-fix]]). Fixed:
+1. **Block ops are interruptible per iteration** (`code_generator.c emit_block`):
+   `LDIR/OTIR/…` now `sms_tick(21|16)` per iteration instead of accumulating
+   `s->cyc` and ticking once — so the VDP advances and IRQs are sampled mid-op
+   like real hardware/superzazu. This was the big one: a long boot LDIR ran
+   atomically before, deferring every VBlank, so frame boundaries fell on totally
+   different instructions. After: SonicBlast frames 0–200 are **game-var
+   byte-identical** to `--interp` (boot writes 935/2845/2844/2281 now match
+   exactly; were 8179/0/0/726).
+2. **Poll-deadline** (`glue.c sms_set_sync_deadline`): while VDP `/INT` is
+   asserted, deadline at `cyc+1` so the recompiled fast path samples the IRQ at
+   every instruction boundary (matching interp) until accepted/cleared; otherwise
+   the cheap per-line deadline. Recomputed at the hybrid→native handoff too.
+3. **EI-delay** (`Z80State.ei_block`, codegen EI sets it, `sms_tick` clears it,
+   accept gated on `!ei_block`): a maskable IRQ isn't accepted until after the
+   instruction following `EI`. Removed the spurious reentrant IRQ.
+
+**Sonic 1 SMS re-verified:** 131 funcs, irq/frame 1.00, GHZ renders pixel-correct,
+VRAM/CRAM match `--interp` at the documented baseline rate. No regression.
+
+### KNOWN REGRESSION (open) — Sonic Blast title still white (separate, non-timing)
+
+After the timing fixes, SonicBlast frames 0–200 are game-var-identical to the
+oracle, but a **distinct, non-timing logic divergence** appears at ~frame 237
+(survived all three timing fixes): `$DB04` buffer fills `$0222` where the oracle
+has `$0111` (a value DOUBLED), `$D131` off by one. Traced earlier to the
+`0x4Fxx–0x53xx` title-state handler cluster computing a doubled value that feeds
+the `$8000` hybrid buffer-fill. It is NOT the jump-table logic and NOT timing —
+most likely a CPU-translation bug in one handler in that cluster (e.g. a flag or
+a stray scaling). The write-sequence diff is masked by transient boot-memset
+reordering (regions cleared in a different order but re-converging), so isolating
+it needs a **state-aligned** comparison (align by a game-state anchor, per ChatGPT
+protocol #6), not frame-aligned. Next: compare recomp-vs-interp register state at
+the `0x52xx` cluster entry / the `$8000` call to find the doubled register.
+
+Reusable instruments built this session: raw VRAM/RAM dumps (`<png>.vram`/`.ram`),
+env-armed VRAM/RAM write watches (`SMS_VRAM_WATCH` / `SMS_RAM_WATCH`, value or
+`ALL`, optional `_FRAME`; `-DSMS_TRACE_PC`), per-table jt log, RAM hash column in
+`--vdp-trace`.
 
 ## ROMs — PRESENT and parser-verified
 

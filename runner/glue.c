@@ -178,11 +178,15 @@ uint8_t sms_read8(uint16_t a){
 void sms_write8(uint16_t a, uint8_t v){
 #ifdef SMS_TRACE_PC
     {   /* env-armed RAM write watch: SMS_RAM_WATCH=<hexaddr> [SMS_RAM_WATCH_FRAME=N] */
-        static int armed=-1; static uint16_t waddr; static long wframe;
+        static int armed=-1; static uint16_t waddr; static long wframe; static int wall;
         if (armed<0){ const char *e=getenv("SMS_RAM_WATCH"); armed=e?1:0;
-            if (armed){ waddr=(uint16_t)strtoul(e,NULL,16);
+            wall = (e && (e[0]=='A'||e[0]=='a'));   /* SMS_RAM_WATCH=ALL -> log every write */
+            if (armed){ waddr=wall?0:(uint16_t)strtoul(e,NULL,16);
                 const char *f=getenv("SMS_RAM_WATCH_FRAME"); wframe=f?strtol(f,NULL,10):-1; } }
-        if (armed && a==waddr && (wframe<0 || (long)g_frame==wframe)){
+        if (armed && wall && (wframe<0 || (long)g_frame==wframe)){
+            fprintf(stderr,"W %llu %04X %02X\n", (unsigned long long)g_frame, a, v);
+        } else
+        if (armed && !wall && a==waddr && (wframe<0 || (long)g_frame==wframe)){
             fprintf(stderr,"[ramwatch] frame=%llu addr=%04X val=%02X pc=%04X chain:",
                     (unsigned long long)g_frame, a, v, g_dbg_pc);
             for (int j=1;j<=8 && g_enter_pos>=(uint32_t)j;j++)
@@ -438,12 +442,23 @@ static void advance_vdp(uint64_t cyc){
     }
 }
 
+/* Set the CPU's next sync deadline. Normally the next scanline event, BUT while
+ * the VDP /INT line is asserted (frame/line IRQ pending and not yet cleared) we
+ * deadline at the very next instruction so the recompiled path SAMPLES the IRQ
+ * at every instruction boundary — exactly like the interpreter/hybrid do — until
+ * it is accepted (iff1) or the source is cleared (status read). This is the one
+ * fix that unifies the interrupt-sampling contract across all three CPU modes;
+ * the hot path stays a single compare while no IRQ is pending. */
+void sms_set_sync_deadline(void){
+    g_sync_deadline = vdp_irq_asserted() ? g_z80.cyc + 1 : g_next_line_cyc;
+}
+
 void sms_sync(void){
     if (++g_sync_depth > g_sync_maxdepth) g_sync_maxdepth = g_sync_depth;
     advance_vdp(g_z80.cyc);
-    if (vdp_irq_asserted() && g_z80.iff1)
+    if (vdp_irq_asserted() && g_z80.iff1 && !g_z80.ei_block)
         take_irq();
-    g_sync_deadline = g_next_line_cyc;
+    sms_set_sync_deadline();
     g_sync_depth--;
 }
 
@@ -511,7 +526,8 @@ static void state_to_hz(void){
     g_hz.mem_ptr=g_z80.wz; g_hz.i=g_z80.i; g_hz.r=g_z80.r;
     g_hz.iff1=g_z80.iff1; g_hz.iff2=g_z80.iff2;
     g_hz.interrupt_mode=g_z80.im; g_hz.halted=g_z80.halted;
-    g_hz.int_pending=0; g_hz.nmi_pending=0; g_hz.iff_delay=0;
+    g_hz.int_pending=0; g_hz.nmi_pending=0;
+    g_hz.iff_delay = g_z80.ei_block;     /* carry the EI-delay slot into the interpreter */
 }
 /* g_hz (superzazu) -> g_z80. cyc is reapplied by the caller (rebased). */
 static void state_from_hz(void){
@@ -524,6 +540,7 @@ static void state_from_hz(void){
     g_z80.wz=g_hz.mem_ptr; g_z80.i=g_hz.i; g_z80.r=g_hz.r;
     g_z80.iff1=g_hz.iff1; g_z80.iff2=g_hz.iff2;
     g_z80.im=g_hz.interrupt_mode; g_z80.halted=g_hz.halted;
+    g_z80.ei_block = g_hz.iff_delay ? 1 : 0;
 }
 
 static void hybrid_interpret(uint16_t addr){
@@ -559,6 +576,11 @@ static void hybrid_interpret(uint16_t addr){
     }
     state_from_hz();
     g_z80.cyc = base + g_hz.cyc;         /* reapply rebased absolute time */
+    /* If the routine left an IRQ asserted (e.g. VBlank latched while iff1 was
+     * clear), deadline at the next instruction so native accepts it the instant
+     * it becomes eligible — not many instructions later at the next line. This
+     * is the hybrid->native handoff half of the interrupt-sampling fix. */
+    sms_set_sync_deadline();
     g_hybrid_cyc += g_hz.cyc;            /* cycles this routine spent in the interpreter */
     g_hybrid_calls++;
 }

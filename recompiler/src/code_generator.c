@@ -415,7 +415,7 @@ static void emit_plain(FILE *o, const Z80Insn *in, const OpCtx *c){
                            hl, rpw(c,2,"t")); return; }
         if (y==5){ fprintf(o,"        { uint8_t t; t=s->d;s->d=s->h;s->h=t; t=s->e;s->e=s->l;s->l=t; }\n"); return; }
         if (y==6){ fprintf(o,"        s->iff1 = s->iff2 = false;\n"); return; }
-        fprintf(o,"        s->iff1 = s->iff2 = true;\n"); return;   /* y==7 EI */
+        fprintf(o,"        s->iff1 = s->iff2 = true; s->ei_block = 1;\n"); return;   /* y==7 EI (1-insn IRQ delay) */
     }
     if (z==4) cg_fail(in);                  /* CALL cc */
     if (z==5){
@@ -494,9 +494,16 @@ static void emit_block(FILE *o, uint8_t op){
     const char *contc = (grp==0) ? "z80_bc(s) != 0"
                       : (grp==1) ? "z80_bc(s) != 0 && !(s->f & Z80_FLAG_Z)"
                                  : "s->b != 0";
+    /* Repeating block ops are INTERRUPTIBLE per iteration on real Z80: the CPU
+     * runs one iteration, accounts its cycles, and accepts a pending interrupt
+     * between iterations (re-executing the opcode afterwards). Tick per iteration
+     * (21 cyc continuing / 16 last) so the VDP advances and IRQs are sampled
+     * mid-op exactly like the interpreter — otherwise a long LDIR/OTIR with
+     * interrupts enabled defers every VBlank to after it and the timeline
+     * diverges from the oracle. */
     fprintf(o,"        do {\n");
     emit_block_body(o, op, "            ");
-    fprintf(o,"            s->cyc += 16; if (%s) s->cyc += 5;\n", contc);
+    fprintf(o,"            sms_tick((%s) ? 21 : 16);\n", contc);
     fprintf(o,"        } while (%s);\n", contc);
 }
 
