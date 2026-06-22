@@ -185,17 +185,102 @@ static const Z80Insn *tr_insn_at(const TraceResult *t, uint16_t a){
     for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==a) return &t->insns[i].insn;
     return NULL;
 }
+
+/* Does `in` modify any part of register pair `preg` (0=BC 1=DE 2=HL 3=AF 4=IX
+ * 5=IY)?  Used to trace a pushed register back to its defining `ld rr,nn` across
+ * intervening instructions: the trace stops the moment the pair is redefined by
+ * anything other than that immediate load. Errs toward TRUE (stop) on ambiguous
+ * forms so a stale immediate is never mistaken for a live continuation. */
+static bool insn_writes_rp(const Z80Insn *in, int preg){
+    uint8_t op = in->opcode;
+    switch (in->prefix){
+    case Z80_PFX_NONE:
+        if (op==0xEB) return (preg==1 || preg==2);            /* ex de,hl   */
+        if (op==0xE3) return (preg==2);                        /* ex (sp),hl */
+        switch (preg){
+        case 0: /* BC */ if (op==0x01||op==0x03||op==0x0B||op==0x06||op==0x0E||op==0xC1) return true;
+                         return (op>=0x40 && op<=0x4F);        /* ld b,r / ld c,r */
+        case 1: /* DE */ if (op==0x11||op==0x13||op==0x1B||op==0x16||op==0x1E||op==0xD1) return true;
+                         return (op>=0x50 && op<=0x5F);        /* ld d,r / ld e,r */
+        case 2: /* HL */ if (op==0x21||op==0x23||op==0x2B||op==0x26||op==0x2E||op==0x2A||op==0xE1) return true;
+                         if (op==0x09||op==0x19||op==0x29||op==0x39) return true; /* add hl,rr */
+                         return (op>=0x60 && op<=0x6F);        /* ld h,r / ld l,r */
+        case 3: /* AF */ if (op==0xF1||op==0x08) return true; return insn_clobbers_a(in);
+        default: return false;                                 /* unprefixed leaves IX/IY untouched */
+        }
+    case Z80_PFX_DD: case Z80_PFX_FD: {
+        int self = (in->prefix==Z80_PFX_DD)?4:5;
+        if (preg==self){
+            if (op==0x21||op==0x23||op==0x2B||op==0x2A||op==0xE1) return true;
+            if (op==0x09||op==0x19||op==0x29||op==0x39) return true;
+            return (op==0x26||op==0x2E||(op>=0x60 && op<=0x6F));
+        }
+        if (preg==4||preg==5) return false;                    /* the other index reg is untouched */
+        return true;                                           /* DD/FD ld/alu may hit B/C/D/E/A: conservative */
+    }
+    case Z80_PFX_ED:
+        if (preg==0 && op==0x4B) return true;                  /* ld bc,(nn) */
+        if (preg==1 && op==0x5B) return true;                  /* ld de,(nn) */
+        if (preg==2 && (op==0x42||op==0x52||op==0x62||op==0x72||
+                        op==0x4A||op==0x5A||op==0x6A||op==0x7A||op==0x6B||op==0x7B)) return true;
+        if (op==0xA0||op==0xA1||op==0xA8||op==0xA9||
+            op==0xB0||op==0xB1||op==0xB8||op==0xB9) return true; /* block ops touch BC/DE/HL */
+        if (preg==3) return insn_clobbers_a(in);
+        return false;
+    case Z80_PFX_CB:
+        if (op>=0x40 && op<=0x7F) return false;                /* BIT: no write */
+        switch (op&7){ case 0: case 1: return preg==0; case 2: case 3: return preg==1;
+                       case 4: case 5: return preg==2; case 7: return preg==3; default: return false; }
+    default: return true;                                      /* DDCB/FDCB etc.: conservative */
+    }
+}
 bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
-    /* idiom: ld rr,nn (3B) @ jp-4 ; push rr (1B) @ jp-1 ; jp (hl/ix/iy) @ jp */
-    const Z80Insn *push = tr_insn_at(t, (uint16_t)(jp_addr - 1));
-    const Z80Insn *ld   = tr_insn_at(t, (uint16_t)(jp_addr - 4));
-    if (!push || !ld) return false;
-    if (push->prefix != Z80_PFX_NONE || ld->prefix != Z80_PFX_NONE) return false;
-    int pr = (push->opcode==0xC5)?0 : (push->opcode==0xD5)?1 : (push->opcode==0xE5)?2 : -1;
-    int lr = (ld->opcode==0x01)?0   : (ld->opcode==0x11)?1   : (ld->opcode==0x21)?2   : -1;
-    if (pr < 0 || pr != lr || ld->imm_bits != 16) return false;
-    *cont_addr = ld->imm;
-    return true;
+    /* The Z80 synthesises `call (hl)` as `ld rr,ret ; push rr ; ... ; jp (hl)`.
+     * The push is often immediately before the jp, but it can be SEPARATED from
+     * it by the address computation that reloads the jump register — notably a
+     * jump-table fetch: `ld hl,ret ; push hl ; ld hl,base ; add hl,bc ; ld c,(hl)
+     * ; inc hl ; ld h,(hl) ; ld l,c ; jp (hl)`. So recover the continuation as
+     * the 16-bit immediate that fed whatever value is still on TOP of the stack
+     * at the jp (balancing push/pop over the contiguous block). */
+    int ji=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==jp_addr){ ji=i; break; }
+    if (ji<0) return false;
+    int pend=0;                                 /* pops seen going backward, awaiting a push */
+    for (int i=ji-1; i>=0; i--){
+        const TracedInsn *cur=&t->insns[i], *nxt=&t->insns[i+1];
+        if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) break;  /* left the block */
+        const Z80Insn *in=&cur->insn;
+        if (in->cf==Z80_CF_RET) break;          /* a prior block's terminator */
+        int preg=-1, ispop=0;
+        if (in->prefix==Z80_PFX_NONE){
+            switch (in->opcode){
+                case 0xC5: preg=0; break; case 0xD5: preg=1; break;
+                case 0xE5: preg=2; break; case 0xF5: preg=3; break;
+                case 0xC1: case 0xD1: case 0xE1: case 0xF1: ispop=1; break;
+            }
+        } else if (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD){
+            if      (in->opcode==0xE5) preg=(in->prefix==Z80_PFX_DD)?4:5;
+            else if (in->opcode==0xE1) ispop=1;
+        }
+        if (ispop){ pend++; continue; }
+        if (preg>=0){
+            if (pend>0){ pend--; continue; }    /* this push is popped before the jp */
+            /* Top-of-stack push of `preg`: trace it back to the `ld preg,nn16`
+             * that produced the value, skipping instructions that don't write
+             * preg (e.g. the `jp` between `ld hl,ret` and `push hl` in a
+             * table-dispatch trampoline). Stop if preg is otherwise redefined. */
+            for (int j=i-1; j>=0; j--){
+                const Z80Insn *ld=&t->insns[j].insn;
+                int lr = (ld->prefix==Z80_PFX_NONE)
+                       ? (ld->opcode==0x01?0:ld->opcode==0x11?1:ld->opcode==0x21?2:-1)
+                       : (((ld->prefix==Z80_PFX_DD||ld->prefix==Z80_PFX_FD)&&ld->opcode==0x21)
+                           ?(ld->prefix==Z80_PFX_DD?4:5):-1);
+                if (lr==preg && ld->imm_bits==16){ *cont_addr=ld->imm; return true; }
+                if (insn_writes_rp(ld, preg)) break;  /* redefined by a non-immediate */
+            }
+            return false;                       /* couldn't resolve to an immediate */
+        }
+    }
+    return false;
 }
 /* True for the computed-jump opcodes JP (HL)/(IX)/(IY). */
 static bool is_computed_jp(const Z80Insn *in){
@@ -446,7 +531,7 @@ static int ff_seed_jt(const SmsRom *rom, FuncList *fl, const TraceResult *t, int
         if (off==SIZE_MAX || off+1>=rom->size) break;
         uint16_t T=(uint16_t)(rom_read_offset(rom,off) | (rom_read_offset(rom,off+1)<<8));
         ptr[e]=T; navail=e+1;
-        if (!d.proven && (T>>14)==tslot && T>d.base && T<min_fwd){ min_fwd=T; have_fwd=true; }
+        if ((T>>14)==tslot && T>d.base && T<min_fwd){ min_fwd=T; have_fwd=true; }
     }
     int count = d.proven ? d.count : 0;
     if (!d.proven){
@@ -457,6 +542,15 @@ static int ff_seed_jt(const SmsRom *rom, FuncList *fl, const TraceResult *t, int
         if (count<JT_MIN_ENTRIES || count>JT_HARDCAP) return 0;
     }
     if (count > navail) count = navail;
+    /* A proven index bound (e.g. `cp E4`) can claim more entries than physically
+     * fit: the first forward target is the start of handler CODE, so the table
+     * cannot extend into or past it without overlapping that handler. Clamp the
+     * entry count there so the handler is never mis-marked as table data. (Dense
+     * tables already bound at min_fwd, so this only ever tightens proven ones.) */
+    if (have_fwd){
+        int maxcount = (int)(((uint16_t)(min_fwd - d.base)) / JT_STRIDE);
+        if (maxcount < count) count = maxcount;
+    }
     if (count < JT_MIN_ENTRIES) return 0;
 
     int seeded=0;

@@ -406,25 +406,48 @@ SMS thread; see [[timing-model-irq-sampling-fix]]). Fixed:
 **Sonic 1 SMS re-verified:** 131 funcs, irq/frame 1.00, GHZ renders pixel-correct,
 VRAM/CRAM match `--interp` at the documented baseline rate. No regression.
 
-### KNOWN REGRESSION (open) — Sonic Blast title still white (separate, non-timing)
+### Differential harness + 5 recompiler/runner fixes (2026-06-22) — title correct thru frame 665
 
-After the timing fixes, SonicBlast frames 0–200 are game-var-identical to the
-oracle, but a **distinct, non-timing logic divergence** appears at ~frame 237
-(survived all three timing fixes): `$DB04` buffer fills `$0222` where the oracle
-has `$0111` (a value DOUBLED), `$D131` off by one. Traced earlier to the
-`0x4Fxx–0x53xx` title-state handler cluster computing a doubled value that feeds
-the `$8000` hybrid buffer-fill. It is NOT the jump-table logic and NOT timing —
-most likely a CPU-translation bug in one handler in that cluster (e.g. a flag or
-a stray scaling). The write-sequence diff is masked by transient boot-memset
-reordering (regions cleared in a different order but re-converging), so isolating
-it needs a **state-aligned** comparison (align by a game-state anchor, per ChatGPT
-protocol #6), not frame-aligned. Next: compare recomp-vs-interp register state at
-the `0x52xx` cluster entry / the `$8000` call to find the doubled register.
+Built the **entry-state-aligned differential FUNCTION harness** (`glue.c`, env
+`SMS_DIFF_ADDR`/`_LO`/`_HI`/`_TRACE`): replay a function BOTH recompiled
+(`call_by_address`) and via superzazu from the same frozen snapshot, diff exit
+regs + RAM + **cyc** (a cyc delta with the VDP frozen is a pure cycle-count bug).
+Invariant-based, no timeline. It found four general control-flow mistranslations
+(all fixed, all leave **Sonic 1 SMS GHZ pixel-perfect**, 131 funcs); each fix
+advanced the recomp-vs-interp divergence frame **357 → 583 → 666**:
 
-Reusable instruments built this session: raw VRAM/RAM dumps (`<png>.vram`/`.ram`),
-env-armed VRAM/RAM write watches (`SMS_VRAM_WATCH` / `SMS_RAM_WATCH`, value or
-`ALL`, optional `_FRAME`; `-DSMS_TRACE_PC`), per-table jt log, RAM hash column in
-`--vdp-trace`.
+1. **Computed-call, push separated from `jp(hl)`** by table-lookup code —
+   `trace_computed_call` balances push/pop across the block (4FDC/51E1).
+2. **Pop-return-then-ret-to-ancestor** (a fn pops its own return then RETs to a
+   grandparent, aborting N frames) — every emitted call now propagates the C
+   return when SP rose past its call frame (`code_generator.c`) (52DE/5265).
+3. **Computed-call, `ld rr,ret` separated from `push rr` by a jump** —
+   `trace_computed_call` + new `insn_writes_rp` trace the pushed register back to
+   its immediate load across non-writing insns (537A — the animation command
+   trampoline).
+4. **Jump-table count overran into handler code** — `ff_seed_jt` clamps the entry
+   count at the first forward target even for PROVEN tables; a `cp E4` bound
+   claimed 4 entries but handler `4DC0` began after entry 3, so `mark_data`
+   mis-marked it → empty `func_4DC0`. Clamp restored the handler.
+5. **IM1 acceptance cost** — `take_irq` now charges the hardware **13 T-states**
+   (matches superzazu `z80_gen_int`); was 0.
+
+**Remaining blocker = sub-frame timing jitter, NOT logic.** The title VRAM
+uploads at frame 668; the recomp diverges at 666 (one object processed a frame
+early in the per-frame hybrid `0x8000` routine). Proven via the cyc-diff (0
+mismatches in any recompiled function incl. IRQ handler 0038) and a per-frame
+instruction counter (`g_frame_ic`, `SMS_IC_TRACE`): per-frame insn counts diverge
+by **±1 from frame 45** (oscillating, mostly self-cancelling). Root: the recomp's
+**pre-pay** cycle model — `sms_tick(N)` precedes each instruction body, so IRQs
+are sampled one insn earlier than superzazu's post-pay. The tick must precede
+control-flow bodies (`goto`/`return` live there), so pre-pay is architectural.
+Per [feedback: invariants over emulator state-alignment] this is the timing
+boundary, not a bug to chase by emulator-matching — left documented, user-decided.
+
+Reusable instruments: raw VRAM/RAM dumps (`<png>.vram`/`.ram`), `SMS_VRAM_WATCH` /
+`SMS_RAM_WATCH` (value or `ALL`, optional `_FRAME`), `SMS_RING_DUMP_FRAME`
+(enter-ring spin dump), per-table jt log, `--vdp-trace` (per-frame RAM hash + SP),
+the differential harness (regs/RAM/cyc), and `g_frame_ic`/`SMS_IC_TRACE`.
 
 ## ROMs — PRESENT and parser-verified
 

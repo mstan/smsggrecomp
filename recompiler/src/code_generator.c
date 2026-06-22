@@ -608,11 +608,17 @@ static void emit_call_target(FILE *o, uint16_t T, uint16_t ret, const char *cond
     char call[64];
     if (nm) snprintf(call,sizeof call,"%s();", nm);
     else    snprintf(call,sizeof call,"call_by_address(0x%04X);", T);
+    /* Propagation guard: a well-behaved callee returns with SP exactly back to
+     * its pre-push value. If it returns HIGHER (it popped its own return and
+     * RET'd to an ancestor — the "abort N frames" idiom), the Z80 control flow
+     * went past us, so we must propagate the return up the C call stack rather
+     * than resume after the call. Each ancestor repeats the check until SP
+     * matches, unwinding exactly the right number of frames. */
     if (condexpr){
-        fprintf(o,"        if (%s) { s->cyc += %d; s->sp = (uint16_t)(s->sp - 2); sms_write16(s->sp, 0x%04X); %s }\n",
+        fprintf(o,"        if (%s) { s->cyc += %d; uint16_t _csp = s->sp; s->sp = (uint16_t)(s->sp - 2); sms_write16(s->sp, 0x%04X); %s if ((int16_t)(s->sp - _csp) > 0) return; }\n",
                 condexpr, extra, ret, call);
     } else {
-        fprintf(o,"        s->sp = (uint16_t)(s->sp - 2); sms_write16(s->sp, 0x%04X); %s\n", ret, call);
+        fprintf(o,"        { uint16_t _csp = s->sp; s->sp = (uint16_t)(s->sp - 2); sms_write16(s->sp, 0x%04X); %s if ((int16_t)(s->sp - _csp) > 0) return; }\n", ret, call);
     }
 }
 
@@ -633,7 +639,10 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
                                 : (in->prefix==Z80_PFX_FD) ? "s->iy" : "z80_hl(s)";
                 uint16_t cont;
                 if (in->opcode==0xE9 && G_TR && trace_computed_call(G_TR, addr, &cont) && tr_has(cont))
-                    fprintf(o,"        call_by_address(%s); goto L_%04X;\n", idx, cont);  /* computed call */
+                    /* computed call: one return (cont) was pushed before jp(hl);
+                     * expected post-return SP is the current SP + 2. If higher,
+                     * the callee RET'd past us — propagate (see emit_call_target). */
+                    fprintf(o,"        { uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(%s); if ((int16_t)(s->sp - _csp) > 0) return; goto L_%04X; }\n", idx, cont);
                 else
                     fprintf(o,"        call_by_address(%s); return;\n", idx);            /* tail jump */
             } else emit_jump_target(o, in->target, NULL, 0);

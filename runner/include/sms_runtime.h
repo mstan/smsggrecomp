@@ -106,10 +106,14 @@ void sms_dispatch_miss(uint16_t addr);  /* runner: log an unresolved target */
  * $8000), or -1 for the RAM region. Generated bank-aware dispatch uses this. */
 int  sms_slot_bank(uint16_t addr);
 
+extern int g_diff_freeze; extern uint64_t g_diff_icount; void sms_diff_abort(void);
+extern uint64_t g_frame_ic;   /* per-frame instruction count (timing-drift probe) */
 static inline void sms_tick(uint8_t n){
+    g_frame_ic++;
     g_z80.cyc += n;
     if (g_z80.cyc >= g_sync_deadline) sms_sync();
     g_z80.ei_block = 0;   /* the EI-delay covers exactly one instruction boundary */
+    if (g_diff_freeze && ++g_diff_icount > 3000000u) sms_diff_abort();  /* bound diff test runs */
 }
 
 /* ---- always-on function-entry ring (PRINCIPLES #17) ---------------------- *
@@ -122,9 +126,12 @@ static inline void sms_tick(uint8_t n){
 extern uint16_t g_enter_ring[SMS_ENTER_RING_SIZE];
 extern uint32_t g_enter_pos;
 
+extern int g_diff_active;
+void sms_diff_enter(uint16_t addr);     /* differential function harness (debug) */
 static inline void sms_enter(uint16_t addr){
     g_enter_ring[g_enter_pos & (SMS_ENTER_RING_SIZE - 1)] = addr;
     g_enter_pos++;
+    if (g_diff_active) sms_diff_enter(addr);
 }
 
 /* Optional per-instruction PC breadcrumb (debug builds only). Generated code
@@ -132,7 +139,8 @@ static inline void sms_enter(uint16_t addr){
  * executed address so a stall can be localised. Compiled out by default. */
 #ifdef SMS_TRACE_PC
 extern uint16_t g_dbg_pc;
-#define SMS_PC(a) (g_dbg_pc = (uint16_t)(a))
+extern int g_diff_trace; void sms_diff_logpc(void);   /* differential instruction-level trace */
+#define SMS_PC(a) (g_dbg_pc = (uint16_t)(a), (g_diff_trace ? sms_diff_logpc() : (void)0))
 #else
 #define SMS_PC(a) ((void)0)
 #endif

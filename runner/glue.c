@@ -29,6 +29,7 @@
 /* ---- CPU + memory ---- */
 Z80State  g_z80;
 uint64_t  g_sync_deadline;
+uint64_t  g_frame_ic;   /* per-frame instruction count probe */
 
 static uint8_t  *g_rom;
 static size_t    g_rom_size;
@@ -264,6 +265,8 @@ void sms_io_out(uint8_t p, uint8_t v){
 /* ====================== timing + interrupts ====================== */
 static void frame_completed(void){
     g_frame++;
+    { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
+      if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
     if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
     if (g_audio_sink){
         /* Drain this frame's PSG output to the sink (interleaved stereo). The
@@ -275,14 +278,25 @@ static void frame_completed(void){
     if (g_vdp_trace){
         /* End-of-frame VDP state == what the renderer would consume for this
          * frame. Hash each region separately so the diff says WHICH diverged. */
-        fprintf(g_vdp_trace, "%llu,%016llx,%016llx,%016llx,%016llx,%02X,%02X,%02X,%02X\n",
+        fprintf(g_vdp_trace, "%llu,%016llx,%016llx,%016llx,%016llx,%02X,%02X,%02X,%02X,%04X\n",
                 (unsigned long long)g_frame,
                 (unsigned long long)fnv1a64(g_vdp.vram, sizeof g_vdp.vram),
                 (unsigned long long)fnv1a64(g_vdp.cram, sizeof g_vdp.cram),
                 (unsigned long long)fnv1a64(g_vdp.reg,  sizeof g_vdp.reg),
                 (unsigned long long)fnv1a64(g_ram, sizeof g_ram),
-                g_vdp.reg[8], g_vdp.reg[9], g_vdp.reg[0], g_vdp.reg[1]);
+                g_vdp.reg[8], g_vdp.reg[9], g_vdp.reg[0], g_vdp.reg[1], g_z80.sp);
         fflush(g_vdp_trace);
+    }
+    {   /* env-armed: dump the function-entry ring at a target frame to expose a
+         * spin loop (which functions are repeating when the game is stuck). */
+        static long rf=-2;
+        if (rf==-2){ const char *e=getenv("SMS_RING_DUMP_FRAME"); rf=e?strtol(e,NULL,10):-1; }
+        if (rf>=0 && (long)g_frame==rf){
+            fprintf(stderr,"[ring] frame %ld last 40 entries (newest first):", rf);
+            for (int j=1;j<=40 && g_enter_pos>=(uint32_t)j;j++)
+                fprintf(stderr," %04X", g_enter_ring[(g_enter_pos-j)&(SMS_ENTER_RING_SIZE-1)]);
+            fprintf(stderr,"\n");
+        }
     }
     if (g_dump_path && g_frame == g_dump_frame){
         int nz_vram=0, nz_cram=0;
@@ -413,6 +427,11 @@ static void take_irq(void){
 #endif
     g_irq_taken++;
     if (g_sync_depth > 1) g_irq_reentrant++;
+    g_z80.cyc += 13;                     /* IM1 interrupt acceptance latency (Z80: 13 T-states,
+                                          * matches superzazu's z80_gen_int). Without this the
+                                          * recompiled path runs 13 cycles/frame ahead of the
+                                          * interpreter, drifting by a whole main-loop iteration
+                                          * over hundreds of frames. */
     g_z80.iff1 = g_z80.iff2 = false;     /* Z80 disables interrupts on accept */
     g_z80.halted = false;
     /* push a return address so the handler's RET stays SP-balanced. The real
@@ -426,7 +445,9 @@ static void take_irq(void){
 /* Advance the VDP up to absolute cycle `cyc`, stepping scanlines and firing
  * frame_completed() at each frame boundary. Shared by sms_sync (recompiled
  * path) and the hybrid interpreter so both drive video timing identically. */
+extern int g_diff_freeze;
 static void advance_vdp(uint64_t cyc){
+    if (g_diff_freeze) return;     /* differential harness: VDP frozen during a test run */
     /* Keep the PSG in lockstep with the VDP on the same absolute timeline.
      * Only synthesise when a sink is listening (oracle/diff runs pay nothing).
      * Done before stepping lines so the just-finished frame's samples are
@@ -562,9 +583,9 @@ static void hybrid_interpret(uint16_t addr){
     const long guard_max = 16L*1000L*1000L;
     long guard = 0;
     for (;;){
-        if (vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
+        if (!g_diff_freeze && vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
             z80_gen_int(&g_hz, 0xFF);    /* IM1: vector 0x0038 (data ignored) */
-        z80_step(&g_hz);
+        z80_step(&g_hz); g_frame_ic++;
         advance_vdp(base + g_hz.cyc);
         g_sync_deadline = g_next_line_cyc;
         if (!g_hz.halted && g_hz.sp > entry_sp) break;   /* routine RETed */
@@ -583,6 +604,168 @@ static void hybrid_interpret(uint16_t addr){
     sms_set_sync_deadline();
     g_hybrid_cyc += g_hz.cyc;            /* cycles this routine spent in the interpreter */
     g_hybrid_calls++;
+}
+
+/* ============ differential function harness (invariant, timing-free) ============ *
+ * Invariant: a recompiled function F started from state S must produce the same
+ * register+RAM exit deltas as superzazu running F from S. We run BOTH from one
+ * captured snapshot with IRQ/VDP FROZEN (so neither side is interrupted — pure
+ * computation, no timeline), then diff. A nonzero delta is a pure translation
+ * bug, independent of any emulator timeline. Env: SMS_DIFF_ADDR=<hex> picks the
+ * function to test; SMS_DIFF_LO/HI bound the frame window. */
+int  g_diff_freeze = 0;
+int  g_diff_active = 0;
+static int      g_in_diff = 0;
+static uint16_t g_diff_targets[256]; static int g_diff_ntargets=0;
+static long     g_diff_lo=-1, g_diff_hi=-1, g_diff_max=400;
+static int diff_is_target(uint16_t a){
+    if (g_diff_ntargets==0) return 0;
+    for (int i=0;i<g_diff_ntargets;i++) if (g_diff_targets[i]==a) return 1;
+    return 0;
+}
+
+uint64_t g_diff_icount = 0;        /* instructions in the current controlled run */
+static jmp_buf g_diff_jmp;
+void sms_diff_abort(void){ longjmp(g_diff_jmp, 1); }   /* budget exceeded -> bail the test */
+
+/* ---- instruction-level trace (pinpoint the divergent instruction) ---- */
+int g_diff_trace = 0;
+#define DTRACE_MAX 300000
+typedef struct { uint16_t pc, af, bc, de, hl, ix, iy, sp; } DTrace;
+static DTrace g_rtrace[DTRACE_MAX]; static int g_rtrace_n;
+static DTrace g_strace[DTRACE_MAX]; static int g_strace_n;
+#ifdef SMS_TRACE_PC
+void sms_diff_logpc(void){      /* called from SMS_PC during the controlled recomp run */
+    if (g_rtrace_n>=DTRACE_MAX) return;
+    DTrace *t=&g_rtrace[g_rtrace_n++];
+    t->pc=g_dbg_pc; t->af=(uint16_t)((g_z80.a<<8)|g_z80.f);
+    t->bc=(uint16_t)((g_z80.b<<8)|g_z80.c); t->de=(uint16_t)((g_z80.d<<8)|g_z80.e);
+    t->hl=(uint16_t)((g_z80.h<<8)|g_z80.l); t->ix=g_z80.ix; t->iy=g_z80.iy; t->sp=g_z80.sp;
+}
+#endif
+
+typedef struct { Z80State z; uint8_t ram[0x2000]; int bank[3]; SmsVdp vdp;
+                 uint64_t next_line, deadline, psg; } DiffSnap;
+static void diff_save(DiffSnap *s){
+    s->z=g_z80; memcpy(s->ram,g_ram,sizeof g_ram);
+    s->bank[0]=g_bank[0]; s->bank[1]=g_bank[1]; s->bank[2]=g_bank[2];
+    s->vdp=g_vdp; s->next_line=g_next_line_cyc; s->deadline=g_sync_deadline; s->psg=g_psg_cyc;
+}
+static void diff_restore(const DiffSnap *s){
+    g_z80=s->z; memcpy(g_ram,s->ram,sizeof g_ram);
+    g_bank[0]=s->bank[0]; g_bank[1]=s->bank[1]; g_bank[2]=s->bank[2];
+    g_vdp=s->vdp; g_next_line_cyc=s->next_line; g_sync_deadline=s->deadline; g_psg_cyc=s->psg;
+}
+/* run F purely in superzazu from the current g_z80, until it RETs (sp rises above
+ * entry); IRQ/VDP are frozen by g_diff_freeze. */
+static void diff_run_super(uint16_t addr){
+    if (!g_hz_init){ z80_init(&g_hz); g_hz.read_byte=hyb_read; g_hz.write_byte=hyb_write;
+                     g_hz.port_in=hyb_in; g_hz.port_out=hyb_out; g_hz_init=true; }
+    state_to_hz(); g_hz.pc=addr;
+    uint64_t base=g_z80.cyc; g_hz.cyc=0; uint16_t entry_sp=g_hz.sp;
+    long guard=0;
+    for(;;){
+        if (g_diff_trace && g_strace_n<DTRACE_MAX){ DTrace *t=&g_strace[g_strace_n++];
+            t->pc=g_hz.pc; t->af=(uint16_t)((g_hz.a<<8)|pack_f(&g_hz));
+            t->bc=(uint16_t)((g_hz.b<<8)|g_hz.c); t->de=(uint16_t)((g_hz.d<<8)|g_hz.e);
+            t->hl=(uint16_t)((g_hz.h<<8)|g_hz.l); t->ix=g_hz.ix; t->iy=g_hz.iy; t->sp=g_hz.sp; }
+        uint8_t op0=sms_read8(g_hz.pc);          /* is this a RET-class instruction? */
+        int is_ret = (op0==0xC9)||(op0==0xC0)||(op0==0xC8)||(op0==0xD0)||(op0==0xD8)||
+                     (op0==0xE0)||(op0==0xE8)||(op0==0xF0)||(op0==0xF8)||
+                     (op0==0xED && (sms_read8((uint16_t)(g_hz.pc+1))==0x4D||sms_read8((uint16_t)(g_hz.pc+1))==0x45));
+        uint16_t sp_before=g_hz.sp;
+        z80_step(&g_hz);
+        /* Treat it as the function returning only when an actual RET *fired* and
+         * raised SP above entry. Requiring SP to have risen this step excludes
+         * (a) a bare `pop` (not a ret) and (b) an UNTAKEN conditional ret (SP
+         * unchanged) — both of which otherwise false-trip when an earlier pop
+         * already lifted SP above entry. */
+        if (!g_hz.halted && is_ret && g_hz.sp > sp_before && g_hz.sp > entry_sp) break;
+        if (++guard >= 8L*1000*1000) break; }
+    state_from_hz(); g_z80.cyc=base+g_hz.cyc;
+}
+static int diff_compare(const DiffSnap *r, const DiffSnap *i, uint16_t addr){
+    int rd = r->z.a!=i->z.a||r->z.f!=i->z.f||r->z.b!=i->z.b||r->z.c!=i->z.c||
+             r->z.d!=i->z.d||r->z.e!=i->z.e||r->z.h!=i->z.h||r->z.l!=i->z.l||
+             r->z.ix!=i->z.ix||r->z.iy!=i->z.iy||r->z.sp!=i->z.sp;
+    int rf=-1; for (int k=0;k<0x2000;k++) if (r->ram[k]!=i->ram[k]){ rf=k; break; }
+    /* Both runs start at the same cyc with the VDP frozen, so a cycle delta
+     * difference is a pure cycle-count translation bug (the accumulator that
+     * drifts the recompiled timeline against the hardware/interpreter). */
+    int rc = (r->z.cyc != i->z.cyc);
+    if (!rd && rf<0 && !rc){ fprintf(stderr,"[diff] %04X ok (frame %llu)\n",addr,(unsigned long long)g_frame); return 0; }
+    fprintf(stderr,"[diff] %04X DIVERGES (frame %llu):",addr,(unsigned long long)g_frame);
+    if (rc) fprintf(stderr," cyc{%llu/%llu d=%+lld}",
+                    (unsigned long long)r->z.cyc,(unsigned long long)i->z.cyc,
+                    (long long)(r->z.cyc - i->z.cyc));
+    if (rd){ fprintf(stderr," regs{");
+        #define RB(N,X) if(r->z.X!=i->z.X)fprintf(stderr," " N ":%02X/%02X",r->z.X,i->z.X)
+        RB("A",a);RB("F",f);RB("B",b);RB("C",c);RB("D",d);RB("E",e);RB("H",h);RB("L",l);
+        if(r->z.ix!=i->z.ix)fprintf(stderr," IX:%04X/%04X",r->z.ix,i->z.ix);
+        if(r->z.iy!=i->z.iy)fprintf(stderr," IY:%04X/%04X",r->z.iy,i->z.iy);
+        if(r->z.sp!=i->z.sp)fprintf(stderr," SP:%04X/%04X",r->z.sp,i->z.sp);
+        fprintf(stderr," }"); }
+    if (rf>=0){ int n=0; fprintf(stderr," ram{");
+        for (int k=rf;k<0x2000&&n<8;k++) if(r->ram[k]!=i->ram[k]){ fprintf(stderr," %04X:%02X/%02X",0xC000+k,r->ram[k],i->ram[k]); n++; }
+        fprintf(stderr," }"); }
+    fprintf(stderr,"  (recomp/interp)\n");
+    return 1;
+}
+void sms_diff_enter(uint16_t addr){
+    if (g_in_diff || !diff_is_target(addr)) return;
+    if (g_diff_lo>=0 && ((long)g_frame<g_diff_lo || (long)g_frame>g_diff_hi)) return;
+    if (g_diff_max<=0) return;
+    g_diff_max--;
+    g_in_diff=1; g_diff_freeze=1;
+    static DiffSnap S, R, I;               /* static: survive setjmp/longjmp cleanly */
+    diff_save(&S);
+    g_rtrace_n=g_strace_n=0; g_diff_trace=getenv("SMS_DIFF_TRACE")?1:0;
+    g_sync_deadline=(uint64_t)-1; g_diff_icount=0;
+    if (setjmp(g_diff_jmp)==0){
+        call_by_address(addr);             /* controlled recompiled run of F (longjmps if over budget) */
+        diff_save(&R);
+        diff_restore(&S); g_sync_deadline=(uint64_t)-1;
+        diff_run_super(addr);              /* superzazu run of F from the same S */
+        diff_save(&I);
+        diff_restore(&S);
+        g_in_diff=0; g_diff_freeze=0;
+        int d = diff_compare(&R,&I,addr);
+        if (d && g_diff_trace){            /* pinpoint the first divergent instruction */
+            int n = g_rtrace_n<g_strace_n?g_rtrace_n:g_strace_n, k;
+            for (k=0;k<n;k++){ DTrace*a=&g_rtrace[k],*b=&g_strace[k];
+                if (a->pc!=b->pc||a->af!=b->af||a->bc!=b->bc||a->de!=b->de||a->hl!=b->hl||a->ix!=b->ix||a->iy!=b->iy||a->sp!=b->sp) break; }
+            if (k>0){ DTrace*p=&g_rtrace[k-1];
+                fprintf(stderr,"[diff]   first divergent instruction @ PC %04X (entered insn %d). State AFTER it (recomp/interp at next-insn %04X):\n",p->pc,k-1,g_rtrace[k].pc);
+                DTrace*a=&g_rtrace[k],*b=&g_strace[k];
+                fprintf(stderr,"[diff]     AF %04X/%04X BC %04X/%04X DE %04X/%04X HL %04X/%04X IX %04X/%04X IY %04X/%04X SP %04X/%04X\n",
+                        a->af,b->af,a->bc,b->bc,a->de,b->de,a->hl,b->hl,a->ix,b->ix,a->iy,b->iy,a->sp,b->sp);
+                int lo = k-6<0?0:k-6;          /* dump the tails of both streams */
+                fprintf(stderr,"[diff]   RECOMP tail (n=%d):",g_rtrace_n);
+                for(int j=lo;j<g_rtrace_n && j<k+4;j++) fprintf(stderr," %04X(sp%04X)",g_rtrace[j].pc,g_rtrace[j].sp);
+                fprintf(stderr,"\n[diff]   INTERP tail (n=%d):",g_strace_n);
+                for(int j=lo;j<g_strace_n && j<k+4;j++) fprintf(stderr," %04X(sp%04X)",g_strace[j].pc,g_strace[j].sp);
+                fprintf(stderr,"\n");
+            }
+            g_diff_max=0;                  /* one shot */
+        }
+        g_diff_trace=0;
+    } else {                               /* controlled run never returned -> skip */
+        g_diff_trace=0;
+        diff_restore(&S);
+        g_in_diff=0; g_diff_freeze=0;
+        fprintf(stderr,"[diff] %04X skipped (non-returning, frame %llu)\n",addr,(unsigned long long)g_frame);
+    }
+}
+void glue_diff_init(void){
+    const char *a=getenv("SMS_DIFF_ADDR");
+    if (!a) return;
+    g_diff_active=1; g_diff_ntargets=0;
+    char buf[512]; snprintf(buf,sizeof buf,"%s",a);
+    for (char *t=strtok(buf,",; "); t && g_diff_ntargets<256; t=strtok(NULL,",; "))
+        g_diff_targets[g_diff_ntargets++]=(uint16_t)strtoul(t,NULL,16);
+    const char *lo=getenv("SMS_DIFF_LO"), *hi=getenv("SMS_DIFF_HI");
+    if (lo) g_diff_lo=strtol(lo,NULL,10);
+    if (hi) g_diff_hi=strtol(hi,NULL,10);
 }
 
 /* ====================== dispatch miss ====================== */
@@ -662,6 +845,7 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     g_psg_cyc = 0;
     g_pad1 = g_pad2 = 0;                  /* controllers idle */
     g_hybrid_cyc = g_hybrid_calls = 0;
+    glue_diff_init();                    /* differential harness (env-gated, no-op unless SMS_DIFF_ADDR) */
 }
 
 void glue_run_interp(void){
@@ -677,7 +861,7 @@ void glue_run_interp(void){
         for (;;){
             if (vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
                 z80_gen_int(&g_hz, 0xFF);          /* IM1 vector 0x0038 */
-            z80_step(&g_hz);
+            z80_step(&g_hz); g_frame_ic++;
             advance_vdp(g_hz.cyc);                  /* frame dump/limit/cb here */
             g_sync_deadline = g_next_line_cyc;
         }
