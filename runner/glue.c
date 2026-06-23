@@ -800,7 +800,7 @@ void sms_diff_abort(void){ longjmp(g_diff_jmp, 1); }   /* budget exceeded -> bai
 /* ---- instruction-level trace (pinpoint the divergent instruction) ---- */
 int g_diff_trace = 0;
 #define DTRACE_MAX 300000
-typedef struct { uint16_t pc, af, bc, de, hl, ix, iy, sp; } DTrace;
+typedef struct { uint16_t pc, af, bc, de, hl, ix, iy, sp; uint32_t cyc; } DTrace;
 static DTrace g_rtrace[DTRACE_MAX]; static int g_rtrace_n;
 static DTrace g_strace[DTRACE_MAX]; static int g_strace_n;
 #ifdef SMS_TRACE_PC
@@ -810,6 +810,7 @@ void sms_diff_logpc(void){      /* called from SMS_PC during the controlled reco
     t->pc=g_dbg_pc; t->af=(uint16_t)((g_z80.a<<8)|g_z80.f);
     t->bc=(uint16_t)((g_z80.b<<8)|g_z80.c); t->de=(uint16_t)((g_z80.d<<8)|g_z80.e);
     t->hl=(uint16_t)((g_z80.h<<8)|g_z80.l); t->ix=g_z80.ix; t->iy=g_z80.iy; t->sp=g_z80.sp;
+    t->cyc=(uint32_t)g_z80.cyc;     /* cycles consumed BEFORE this instruction */
 }
 #endif
 
@@ -837,7 +838,8 @@ static void diff_run_super(uint16_t addr){
         if (g_diff_trace && g_strace_n<DTRACE_MAX){ DTrace *t=&g_strace[g_strace_n++];
             t->pc=g_hz.pc; t->af=(uint16_t)((g_hz.a<<8)|pack_f(&g_hz));
             t->bc=(uint16_t)((g_hz.b<<8)|g_hz.c); t->de=(uint16_t)((g_hz.d<<8)|g_hz.e);
-            t->hl=(uint16_t)((g_hz.h<<8)|g_hz.l); t->ix=g_hz.ix; t->iy=g_hz.iy; t->sp=g_hz.sp; }
+            t->hl=(uint16_t)((g_hz.h<<8)|g_hz.l); t->ix=g_hz.ix; t->iy=g_hz.iy; t->sp=g_hz.sp;
+            t->cyc=(uint32_t)g_hz.cyc; }
         uint8_t op0=sms_read8(g_hz.pc);          /* is this a RET-class instruction? */
         int is_ret = (op0==0xC9)||(op0==0xC0)||(op0==0xC8)||(op0==0xD0)||(op0==0xD8)||
                      (op0==0xE0)||(op0==0xE8)||(op0==0xF0)||(op0==0xF8)||
@@ -900,21 +902,43 @@ void sms_diff_enter(uint16_t addr){
         g_in_diff=0; g_diff_freeze=0;
         int d = diff_compare(&R,&I,addr);
         if (d && g_diff_trace){            /* pinpoint the first divergent instruction */
-            int n = g_rtrace_n<g_strace_n?g_rtrace_n:g_strace_n, k;
-            for (k=0;k<n;k++){ DTrace*a=&g_rtrace[k],*b=&g_strace[k];
-                if (a->pc!=b->pc||a->af!=b->af||a->bc!=b->bc||a->de!=b->de||a->hl!=b->hl||a->ix!=b->ix||a->iy!=b->iy||a->sp!=b->sp) break; }
-            if (k>0){ DTrace*p=&g_rtrace[k-1];
-                fprintf(stderr,"[diff]   first divergent instruction @ PC %04X (entered insn %d). State AFTER it (recomp/interp at next-insn %04X):\n",p->pc,k-1,g_rtrace[k].pc);
-                DTrace*a=&g_rtrace[k],*b=&g_strace[k];
-                fprintf(stderr,"[diff]     AF %04X/%04X BC %04X/%04X DE %04X/%04X HL %04X/%04X IX %04X/%04X IY %04X/%04X SP %04X/%04X\n",
-                        a->af,b->af,a->bc,b->bc,a->de,b->de,a->hl,b->hl,a->ix,b->ix,a->iy,b->iy,a->sp,b->sp);
-                int lo = k-6<0?0:k-6;          /* dump the tails of both streams */
-                fprintf(stderr,"[diff]   RECOMP tail (n=%d):",g_rtrace_n);
-                for(int j=lo;j<g_rtrace_n && j<k+4;j++) fprintf(stderr," %04X(sp%04X)",g_rtrace[j].pc,g_rtrace[j].sp);
-                fprintf(stderr,"\n[diff]   INTERP tail (n=%d):",g_strace_n);
-                for(int j=lo;j<g_strace_n && j<k+4;j++) fprintf(stderr," %04X(sp%04X)",g_strace[j].pc,g_strace[j].sp);
-                fprintf(stderr,"\n");
+            uint32_t rbase = g_rtrace_n?g_rtrace[0].cyc:0, ibase = g_strace_n?g_strace[0].cyc:0;
+            /* Walk both streams by LOGICAL instruction, collapsing runs of the same
+             * consecutive PC. A block op (LDIR/CPIR/OTIR...) re-logs the same PC once
+             * per iteration in the interp stream but only once in recomp, so naive
+             * index alignment trips at the first block op even when totals agree.
+             * Collapsing equal-consecutive-PC runs (block ops re-execute the SAME pc;
+             * ordinary loops revisit a *range* of pcs, not one) aligns the streams.
+             * At each logical step we compare regs + cumulative-cyc consumed BEFORE
+             * the op; the first mismatch lands on the mistranslated instruction. */
+            int ri=0, ii=0; uint16_t prev_pc=0xFFFF; int found=0;
+            while (ri<g_rtrace_n && ii<g_strace_n){
+                DTrace*a=&g_rtrace[ri],*b=&g_strace[ii];
+                uint32_t ra=a->cyc-rbase, ib=b->cyc-ibase;
+                int state_div = (a->pc!=b->pc||a->af!=b->af||a->bc!=b->bc||a->de!=b->de||
+                                 a->hl!=b->hl||a->ix!=b->ix||a->iy!=b->iy||a->sp!=b->sp);
+                if (state_div || ra!=ib){
+                    fprintf(stderr,"[diff]   first divergent op: prev logical PC %04X -> now recomp %04X / interp %04X (%s)\n",
+                            prev_pc, a->pc, b->pc, state_div?"state":"cycles");
+                    fprintf(stderr,"[diff]     at-entry AF %04X/%04X BC %04X/%04X DE %04X/%04X HL %04X/%04X IX %04X/%04X IY %04X/%04X SP %04X/%04X  cyc-rel %u/%u (prev-op cost recomp=%u interp=%u)\n",
+                            a->af,b->af,a->bc,b->bc,a->de,b->de,a->hl,b->hl,a->ix,b->ix,a->iy,b->iy,a->sp,b->sp,
+                            (unsigned)ra,(unsigned)ib,
+                            (unsigned)(ra-(ri>0?(g_rtrace[ri-1].cyc-rbase):0)),
+                            (unsigned)(ib-(ii>0?(g_strace[ii-1].cyc-ibase):0)));
+                    int rl=ri-5<0?0:ri-5, il=ii-5<0?0:ii-5;
+                    fprintf(stderr,"[diff]   RECOMP tail:");
+                    for(int j=rl;j<g_rtrace_n && j<ri+3;j++) fprintf(stderr," %04X(c%u)",g_rtrace[j].pc,(unsigned)(g_rtrace[j].cyc-rbase));
+                    fprintf(stderr,"\n[diff]   INTERP tail:");
+                    for(int j=il;j<g_strace_n && j<ii+3;j++) fprintf(stderr," %04X(c%u)",g_strace[j].pc,(unsigned)(g_strace[j].cyc-ibase));
+                    fprintf(stderr,"\n");
+                    found=1; break;
+                }
+                prev_pc=a->pc;
+                uint16_t pc=a->pc;     /* collapse the equal-consecutive-PC run in each stream */
+                do ri++; while (ri<g_rtrace_n && g_rtrace[ri].pc==pc);
+                do ii++; while (ii<g_strace_n && g_strace[ii].pc==pc);
             }
+            if (!found) fprintf(stderr,"[diff]   streams matched through min length (r=%d i=%d) - divergence past trace window\n",g_rtrace_n,g_strace_n);
             g_diff_max=0;                  /* one shot */
         }
         g_diff_trace=0;
@@ -929,12 +953,14 @@ void glue_diff_init(void){
     const char *a=getenv("SMS_DIFF_ADDR");
     if (!a) return;
     g_diff_active=1; g_diff_ntargets=0;
-    char buf[512]; snprintf(buf,sizeof buf,"%s",a);
+    char buf[8192]; snprintf(buf,sizeof buf,"%s",a);   /* hold a full slot sweep (256 targets) */
     for (char *t=strtok(buf,",; "); t && g_diff_ntargets<256; t=strtok(NULL,",; "))
         g_diff_targets[g_diff_ntargets++]=(uint16_t)strtoul(t,NULL,16);
     const char *lo=getenv("SMS_DIFF_LO"), *hi=getenv("SMS_DIFF_HI");
     if (lo) g_diff_lo=strtol(lo,NULL,10);
     if (hi) g_diff_hi=strtol(hi,NULL,10);
+    const char *mx=getenv("SMS_DIFF_MAX");
+    if (mx) g_diff_max=strtol(mx,NULL,10);
 }
 
 /* ====================== dispatch miss ====================== */
