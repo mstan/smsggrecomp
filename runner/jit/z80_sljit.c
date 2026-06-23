@@ -15,6 +15,7 @@
 #include "z80_sljit.h"
 #include "z80_decoder.h"
 #include "sljitLir.h"
+#include <string.h>
 
 /* flag-exact helpers (z80_sljit_helpers.c), backed by z80_ops.h */
 extern long z80h_inc8(Z80State *s, long v);
@@ -225,28 +226,152 @@ static void set_decl(uint16_t pc, const Z80Insn *in, const char *why){
         z80_sljit_last_decline.text[i] = in->text[i];
 }
 
+/* ---- P1d: control flow ---- */
+#define SPAN 2048    /* max function span (bytes) the shard CFG covers */
+
+/* Emit the Z80 condition test for cc (0..7): leaves sljit Z reflecting the masked
+ * flag and returns the sljit jump type that is TAKEN iff the Z80 condition holds. */
+static sljit_s32 emit_cc(struct sljit_compiler *c, int cc){
+    static const uint8_t MASK[4] = { 0x40, 0x01, 0x04, 0x80 };   /* Z, C, P/V, S */
+    sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), OFF(f));
+    sljit_emit_op2(c, SLJIT_AND | SLJIT_SET_Z, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, MASK[cc>>1]);
+    return (cc & 1) ? SLJIT_NOT_ZERO : SLJIT_ZERO;   /* odd cc = "flag set" */
+}
+static void emit_ret(struct sljit_compiler *c, int cyc){
+    sljit_emit_op1(c, SLJIT_MOV_U16, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), OFF(sp));
+    sljit_emit_op2(c, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 2);
+    sljit_emit_op1(c, SLJIT_MOV_U16, SLJIT_MEM1(SLJIT_S0), OFF(sp), SLJIT_R0, 0);
+    emit_tick(c, cyc);
+    sljit_emit_return_void(c);
+}
+
+typedef struct { struct sljit_jump *j; uint16_t target; } PendJump;
+
+/* worker/harness are single-threaded; compile is not re-entrant -> file-static scratch */
+static uint8_t              g_seen[SPAN];
+static struct sljit_label  *g_lab[SPAN];
+static uint16_t             g_work[SPAN];
+static PendJump             g_pend[2*SPAN];
+
 ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
-    struct sljit_compiler *c = sljit_create_compiler(NULL);
-    if (!c) return NULL;
-
-    /* void shard(Z80State *s, const Bus *bus): args land in S0, S1 */
-    sljit_emit_enter(c, 0, SLJIT_ARGS2V(P, P), 3, 2, 0);
-
-    size_t off = 0; uint16_t pc = base; int ok = 1, ended = 0;
-    while (off < len){
-        Z80Insn in;
-        int n = z80_decode(bytes + off, len - off, pc, &in);
-        if (n <= 0 || in.illegal){ set_decl(pc, &in, "illegal/undecodable"); ok = 0; break; }
-        if (!emit_one(c, &in)){                         /* declined */
-            set_decl(pc, &in, in.cf != Z80_CF_NONE ? cf_reason(in.cf) : why_unsupported(&in));
-            ok = 0; break;
+    /* ---- pass 1: reachability (follow control flow; bound to [base, base+SPAN)) ---- */
+    memset(g_seen, 0, sizeof g_seen);
+    int wn = 0, maxrel = 0;
+    g_work[wn++] = base;
+    while (wn){
+        uint16_t a = g_work[--wn];
+        int rel = (int)a - (int)base;
+        if (rel < 0 || rel >= SPAN){
+            Z80Insn d = {0}; set_decl(a, &d, "branch target outside function window"); return NULL;
         }
-        if (in.cf == Z80_CF_RET){ ended = 1; break; }   /* function terminator */
-        if (in.cf != Z80_CF_NONE){ set_decl(pc, &in, cf_reason(in.cf)); ok = 0; break; }
-        off += (size_t)n; pc = (uint16_t)(pc + n);
+        if (g_seen[rel]) continue;
+        if ((size_t)rel >= len) return NULL;
+        Z80Insn in;
+        int n = z80_decode(bytes + rel, len - rel, a, &in);
+        if (n <= 0 || in.illegal){ set_decl(a, &in, "illegal/undecodable"); return NULL; }
+        g_seen[rel] = 1;
+        if (rel + n > maxrel) maxrel = rel + n;
+
+        switch (in.cf){
+            case Z80_CF_NONE: case Z80_CF_RET_COND:
+                g_work[wn++] = (uint16_t)(a + n);                       /* fall through */
+                if (in.cf == Z80_CF_RET_COND) {}                       /* also returns; no succ for that edge */
+                break;
+            case Z80_CF_JUMP:                                          /* JP nn / JR e / JP(HL) */
+                if (!in.has_target){ set_decl(a, &in, "computed jump JP(HL/IX/IY)"); return NULL; }
+                g_work[wn++] = in.target;
+                break;
+            case Z80_CF_JUMP_COND:                                     /* JR cc / JP cc / DJNZ */
+                if (!in.has_target){ set_decl(a, &in, cf_reason(in.cf)); return NULL; }
+                g_work[wn++] = in.target;
+                g_work[wn++] = (uint16_t)(a + n);
+                break;
+            case Z80_CF_CALL: case Z80_CF_CALL_COND:                   /* not in P1d (no CALL yet) */
+                set_decl(a, &in, cf_reason(in.cf)); return NULL;
+            case Z80_CF_RET: default: break;                           /* terminator */
+        }
     }
 
-    if (!ok || !ended){ sljit_free_compiler(c); return NULL; }
+    /* ---- pass 2: emit in ascending address order, a label before every insn ---- */
+    struct sljit_compiler *c = sljit_create_compiler(NULL);
+    if (!c) return NULL;
+    sljit_emit_enter(c, 0, SLJIT_ARGS2V(P, P), 3, 2, 0);   /* void shard(Z80State* S0, Bus* S1) */
+    memset(g_lab, 0, sizeof g_lab);
+    int np = 0;
+
+    for (int rel = 0; rel < maxrel; rel++){
+        if (!g_seen[rel]) continue;
+        uint16_t a = (uint16_t)(base + rel);
+        Z80Insn in;
+        z80_decode(bytes + rel, len - rel, a, &in);
+        g_lab[rel] = sljit_emit_label(c);                  /* label every reachable insn */
+        uint16_t ft = (uint16_t)(a + in.length);
+        uint8_t op = in.opcode;
+
+        if (in.cf == Z80_CF_NONE){
+            if (!emit_one(c, &in)){ set_decl(a, &in, why_unsupported(&in)); sljit_free_compiler(c); return NULL; }
+            continue;
+        }
+        switch (in.cf){
+            case Z80_CF_RET:
+                emit_ret(c, 10);
+                break;
+            case Z80_CF_RET_COND: {
+                sljit_s32 jt = emit_cc(c, (op>>3)&7);
+                struct sljit_jump *Jt = sljit_emit_jump(c, jt);
+                emit_tick(c, 5);                            /* not-taken */
+                struct sljit_jump *Js = sljit_emit_jump(c, SLJIT_JUMP);
+                g_pend[np].j = Js; g_pend[np++].target = ft;
+                sljit_set_label(Jt, sljit_emit_label(c));
+                emit_ret(c, 11);                            /* taken: sp+=2, return */
+                break;
+            }
+            case Z80_CF_JUMP: {
+                emit_tick(c, op == 0x18 ? 12 : 10);         /* JR e : JP nn */
+                struct sljit_jump *Ju = sljit_emit_jump(c, SLJIT_JUMP);
+                g_pend[np].j = Ju; g_pend[np++].target = in.target;
+                break;
+            }
+            case Z80_CF_JUMP_COND: {
+                if (op == 0x10){                            /* DJNZ: B--, jump if B!=0 (13/8) */
+                    sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), OFF(b));
+                    sljit_emit_op2(c, SLJIT_SUB | SLJIT_SET_Z, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
+                    sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0), OFF(b), SLJIT_R0, 0);
+                    struct sljit_jump *Jt = sljit_emit_jump(c, SLJIT_NOT_ZERO);
+                    emit_tick(c, 8);
+                    struct sljit_jump *Js = sljit_emit_jump(c, SLJIT_JUMP);
+                    sljit_set_label(Jt, sljit_emit_label(c)); emit_tick(c, 13);
+                    struct sljit_jump *Jto = sljit_emit_jump(c, SLJIT_JUMP);
+                    g_pend[np].j = Jto; g_pend[np++].target = in.target;
+                    g_pend[np].j = Js;  g_pend[np++].target = ft;
+                } else if ((op & 0xE7) == 0x20){            /* JR cc (12/7) */
+                    sljit_s32 jt = emit_cc(c, (op>>3)&3);
+                    struct sljit_jump *Jt = sljit_emit_jump(c, jt);
+                    emit_tick(c, 7);
+                    struct sljit_jump *Js = sljit_emit_jump(c, SLJIT_JUMP);
+                    sljit_set_label(Jt, sljit_emit_label(c)); emit_tick(c, 12);
+                    struct sljit_jump *Jto = sljit_emit_jump(c, SLJIT_JUMP);
+                    g_pend[np].j = Jto; g_pend[np++].target = in.target;
+                    g_pend[np].j = Js;  g_pend[np++].target = ft;
+                } else {                                    /* JP cc (10, taken or not) */
+                    emit_tick(c, 10);
+                    sljit_s32 jt = emit_cc(c, (op>>3)&7);
+                    struct sljit_jump *Jt = sljit_emit_jump(c, jt);
+                    g_pend[np].j = Jt; g_pend[np++].target = in.target;  /* fall through naturally */
+                }
+                break;
+            }
+            default:
+                set_decl(a, &in, cf_reason(in.cf)); sljit_free_compiler(c); return NULL;
+        }
+    }
+
+    /* wire every recorded jump to its target's label */
+    for (int i = 0; i < np; i++){
+        int trel = (int)g_pend[i].target - (int)base;
+        if (trel < 0 || trel >= SPAN || !g_lab[trel]){ sljit_free_compiler(c); return NULL; }
+        sljit_set_label(g_pend[i].j, g_lab[trel]);
+    }
 
     void *code = sljit_generate_code(c, 0, NULL);
     sljit_free_compiler(c);
