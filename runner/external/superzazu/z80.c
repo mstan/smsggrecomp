@@ -570,35 +570,58 @@ static void in_r_c(z80* const z, uint8_t* r) {
   z->hf = 0;
 }
 
+// Undocumented block-I/O flag behaviour (Sean Young / "The Undocumented Z80
+// Documented"): after the transfer, B is decremented and the full flag set is
+// computed from the transferred value and a temporary k. N = bit7 of value;
+// H = C = (k > 255); P/V = parity((k & 7) ^ B); S/Z/X/Y from B. The temporary
+// k uses (C±1) for IN-block ops and L for OUT-block ops, evaluated on the
+// post-update register state. (The original superzazu only set Z and N, leaving
+// the other flags stale - inaccurate for code that reads them, and the source
+// of a static-recomp vs interp divergence in Sonic 1.)
+static inline void io_block_flags(z80* const z, uint8_t val, uint16_t k) {
+  z->nf = (val >> 7) & 1;
+  z->hf = z->cf = (k > 0xFF) ? 1 : 0;
+  z->pf = parity((uint8_t)((k & 7) ^ z->b));
+  z->sf = (z->b >> 7) & 1;
+  z->zf = z->b == 0;
+  z->xf = (z->b >> 3) & 1;
+  z->yf = (z->b >> 5) & 1;
+}
+
 static void ini(z80* const z) {
   uint8_t val = z->port_in(z, z->c);
   wb(z, get_hl(z), val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
-  z->zf = z->b == 0;
-  z->nf = 1;
+  io_block_flags(z, val, (uint16_t)val + (uint8_t)(z->c + 1));
   z->mem_ptr = get_bc(z) + 1;
 }
 
 static void ind(z80* const z) {
-  ini(z);
-  set_hl(z, get_hl(z) - 2);
-  z->mem_ptr = get_bc(z) - 2;
+  uint8_t val = z->port_in(z, z->c);
+  wb(z, get_hl(z), val);
+  set_hl(z, get_hl(z) - 1);
+  z->b -= 1;
+  io_block_flags(z, val, (uint16_t)val + (uint8_t)(z->c - 1));
+  z->mem_ptr = get_bc(z) - 1;
 }
 
 static void outi(z80* const z) {
-  z->port_out(z, z->c, rb(z, get_hl(z)));
+  uint8_t val = rb(z, get_hl(z));
+  z->port_out(z, z->c, val);
   set_hl(z, get_hl(z) + 1);
   z->b -= 1;
-  z->zf = z->b == 0;
-  z->nf = 1;
+  io_block_flags(z, val, (uint16_t)val + z->l);   // L after the increment
   z->mem_ptr = get_bc(z) + 1;
 }
 
 static void outd(z80* const z) {
-  outi(z);
-  set_hl(z, get_hl(z) - 2);
-  z->mem_ptr = get_bc(z) - 2;
+  uint8_t val = rb(z, get_hl(z));
+  z->port_out(z, z->c, val);
+  set_hl(z, get_hl(z) - 1);
+  z->b -= 1;
+  io_block_flags(z, val, (uint16_t)val + z->l);   // L after the decrement
+  z->mem_ptr = get_bc(z) - 1;
 }
 
 static void daa(z80* const z) {
