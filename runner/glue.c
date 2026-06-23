@@ -141,6 +141,51 @@ static void mb_record(uint16_t addr){
     e->crc = mb_code_crc(addr);
     g_mb_pos++;
 }
+
+/* ---- always-on dispatch manifest (profile-guided static discovery, PRINCIPLES
+ * #16) ---------------------------------------------------------------------- *
+ * Every dispatch miss is recorded as a distinct (addr, b0,b1,b2, crc) signature
+ * in a CUMULATIVE file next to the ROM. The recompiler ingests it next
+ * generation, re-verifies each entry's CRC against the live ROM bytes, and seeds
+ * it as a banked entry - turning a runtime-only (bank-multiplexed, RAM-sourced)
+ * target into static code. Runtime identifies *that* an (addr,bank) is a real
+ * entry (the CPU executed from there); the recompiler's ROM cross-check confirms
+ * *which* bytes - so this never trusts the manifest blindly. The file accumulates
+ * across runs (loaded at init, deduped), so deeper misses surfaced after the
+ * previous generation's seeds went static are added, not lost. */
+typedef struct { uint16_t addr; uint8_t b0,b1,b2; uint32_t crc; } ManifestSig;
+#define MANIFEST_MAX 4096
+static ManifestSig g_manifest[MANIFEST_MAX];
+static int         g_manifest_n;
+static const char *g_manifest_path = "dispatch_manifest.txt";
+static int manifest_has(uint16_t addr, uint8_t b0, uint8_t b1, uint8_t b2){
+    for (int i=0;i<g_manifest_n;i++)
+        if (g_manifest[i].addr==addr && g_manifest[i].b0==b0 &&
+            g_manifest[i].b1==b1 && g_manifest[i].b2==b2) return 1;
+    return 0;
+}
+static void manifest_load(void){           /* read existing file so we accumulate, not clobber */
+    g_manifest_n = 0;
+    FILE *f = fopen(g_manifest_path, "r");
+    if (!f) return;
+    unsigned a,b0,b1,b2,crc;
+    while (fscanf(f, "%x %x %x %x %x", &a,&b0,&b1,&b2,&crc) == 5){
+        if (g_manifest_n < MANIFEST_MAX){
+            ManifestSig *m=&g_manifest[g_manifest_n++];
+            m->addr=(uint16_t)a; m->b0=(uint8_t)b0; m->b1=(uint8_t)b1; m->b2=(uint8_t)b2; m->crc=crc;
+        }
+    }
+    fclose(f);
+}
+static void manifest_record(uint16_t addr){
+    uint8_t b0=(uint8_t)g_bank[0], b1=(uint8_t)g_bank[1], b2=(uint8_t)g_bank[2];
+    if (manifest_has(addr,b0,b1,b2) || g_manifest_n >= MANIFEST_MAX) return;
+    uint32_t crc = mb_code_crc(addr);
+    ManifestSig *m=&g_manifest[g_manifest_n++];
+    m->addr=addr; m->b0=b0; m->b1=b1; m->b2=b2; m->crc=crc;
+    FILE *f = fopen(g_manifest_path, "a");      /* append the new distinct signature */
+    if (f){ fprintf(f, "%04X %02X %02X %02X %08X\n", addr,b0,b1,b2,crc); fclose(f); }
+}
 static void mb_dump(void){
     if (g_mb_on <= 0) return;
     uint32_t n = g_mb_pos < MB_RING ? g_mb_pos : MB_RING;
@@ -168,7 +213,20 @@ static void mb_dump(void){
             }
             if (!seen) distinct++;
         }
-        fprintf(stderr, "[missbank] addr=%04X hits=%u distinct_sig=%u\n", addr, hits, distinct);
+        fprintf(stderr, "[missbank] addr=%04X hits=%u distinct_sig=%u  banks[b0/b1/b2 crc]:", addr, hits, distinct);
+        /* list each distinct (b0,b1,b2,crc) signature so triage sees the live
+         * bank(s) mapped at the miss target without a per-addr second pass. */
+        for (uint32_t j = 0; j < n; j++){
+            MissBankEv *ej = &g_mb_ring[j];
+            if (ej->addr != addr) continue;
+            int seen = 0;
+            for (uint32_t k = 0; k < j; k++){
+                MissBankEv *ek = &g_mb_ring[k];
+                if (ek->addr==addr && ek->b0==ej->b0 && ek->b1==ej->b1 && ek->b2==ej->b2 && ek->crc==ej->crc){ seen=1; break; }
+            }
+            if (!seen) fprintf(stderr, " %02X/%02X/%02X:%08X", ej->b0, ej->b1, ej->b2, ej->crc);
+        }
+        fprintf(stderr, "\n");
     }
     /* top interp-cycle consumers: which dispatch-miss routines still run on the
      * interpreter and how much they cost (the dominant-class signal for coverage). */
@@ -856,7 +914,11 @@ static void diff_run_super(uint16_t addr){
     state_from_hz(); g_z80.cyc=base+g_hz.cyc;
 }
 static int diff_compare(const DiffSnap *r, const DiffSnap *i, uint16_t addr){
-    int rd = r->z.a!=i->z.a||r->z.f!=i->z.f||r->z.b!=i->z.b||r->z.c!=i->z.c||
+    /* Ignore undocumented F bits 3/5 (X/Y): for BIT n,(HL) they derive from the
+     * MEMPTR/WZ register which the recompiler does not track. No game reads them
+     * and they never affect RAM/CRAM/VRAM - masking keeps this harness's "diverge"
+     * signal to architecturally-meaningful state only. */
+    int rd = r->z.a!=i->z.a||((r->z.f^i->z.f)&(uint8_t)~0x28)||r->z.b!=i->z.b||r->z.c!=i->z.c||
              r->z.d!=i->z.d||r->z.e!=i->z.e||r->z.h!=i->z.h||r->z.l!=i->z.l||
              r->z.ix!=i->z.ix||r->z.iy!=i->z.iy||r->z.sp!=i->z.sp;
     int rf=-1; for (int k=0;k<0x2000;k++) if (r->ram[k]!=i->ram[k]){ rf=k; break; }
@@ -915,7 +977,7 @@ void sms_diff_enter(uint16_t addr){
             while (ri<g_rtrace_n && ii<g_strace_n){
                 DTrace*a=&g_rtrace[ri],*b=&g_strace[ii];
                 uint32_t ra=a->cyc-rbase, ib=b->cyc-ibase;
-                int state_div = (a->pc!=b->pc||a->af!=b->af||a->bc!=b->bc||a->de!=b->de||
+                int state_div = (a->pc!=b->pc||((a->af^b->af)&(uint16_t)~0x28)||a->bc!=b->bc||a->de!=b->de||
                                  a->hl!=b->hl||a->ix!=b->ix||a->iy!=b->iy||a->sp!=b->sp);
                 if (state_div || ra!=ib){
                     fprintf(stderr,"[diff]   first divergent op: prev logical PC %04X -> now recomp %04X / interp %04X (%s)\n",
@@ -984,6 +1046,7 @@ static const Bus g_live_bus = { live_r8, live_w8, live_in, live_out, live_call,
 
 void sms_dispatch_miss(uint16_t addr){
     mb_record(addr);                 /* always-on bank-alias probe (env-gated dump) */
+    manifest_record(addr);           /* always-on profile-guided discovery manifest */
 #ifdef SMS_HAVE_JIT
     /* Tier 2: if a trusted shard exists, run it natively and return. Otherwise
      * enqueue an async compile request (non-blocking, deduped — the worker thread
@@ -1065,6 +1128,7 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     free(g_miss_seen);
     g_miss_seen = (uint8_t*)calloc(0x10000, 1);
     remove(g_miss_path);                 /* fresh log per run */
+    manifest_load();                     /* cumulative across runs (not cleared) */
     g_is_gg = is_gg;
     vdp_reset(is_gg);
     g_vdpw_pos = 0;
