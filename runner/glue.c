@@ -833,6 +833,17 @@ void glue_diff_init(void){
 }
 
 /* ====================== dispatch miss ====================== */
+#ifdef SMS_HAVE_JIT
+/* Live bus the shard ABI runs against on the game thread (the worker validates
+ * shards against a sandbox bus over a snapshot instead). Thin wrappers over the
+ * runner's global bus; ctx unused. */
+static uint8_t live_r8 (void *c, uint16_t a){ (void)c; return sms_read8(a); }
+static void    live_w8 (void *c, uint16_t a, uint8_t v){ (void)c; sms_write8(a, v); }
+static uint8_t live_in (void *c, uint8_t p){ (void)c; return sms_io_in(p); }
+static void    live_out(void *c, uint8_t p, uint8_t v){ (void)c; sms_io_out(p, v); }
+static const Bus g_live_bus = { live_r8, live_w8, live_in, live_out, NULL };
+#endif
+
 void sms_dispatch_miss(uint16_t addr){
 #ifdef SMS_HAVE_JIT
     /* Tier 2: if a trusted shard exists, run it natively and return. Otherwise
@@ -841,7 +852,7 @@ void sms_dispatch_miss(uint16_t addr){
      * time. NEVER blocks the game thread (SLJIT.md §2). */
     {
         ShardFn _sh = sms_jit_lookup(addr);
-        if (_sh){ _sh(&g_z80); return; }
+        if (_sh){ _sh(&g_z80, &g_live_bus); return; }
         sms_jit_request(addr);
     }
 #endif

@@ -18,13 +18,9 @@
 
 #include <stdint.h>
 #include "sms_runtime.h"
+#include "jit_abi.h"          /* Bus + ShardFn (void shard(Z80State*, const Bus*)) */
 
 #ifdef SMS_HAVE_JIT
-
-/* A compiled shard runs on a Z80State. P1 widens this ABI to (Z80State*, const Bus*)
- * so the worker can validate a shard off-thread on a snapshot; for the P0 scaffold
- * the type exists but no shard is ever produced. */
-typedef void (*ShardFn)(Z80State *s);
 
 void    sms_jit_init(void);              /* start the worker thread */
 void    sms_jit_shutdown(void);          /* signal + join the worker thread */
