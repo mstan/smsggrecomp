@@ -860,7 +860,11 @@ static void    live_out(void *c, uint8_t p, uint8_t v){ (void)c; sms_io_out(p, v
 /* shard CALL on the game thread: the live shard runs on &g_z80, so the callee runs
  * on the live dispatcher (Tier 1/2/3) over the same global state. */
 static void    live_call(void *c, Z80State *s, uint16_t t){ (void)c; (void)s; call_by_address(t); }
-static const Bus g_live_bus = { live_r8, live_w8, live_in, live_out, live_call, NULL };
+/* shard per-instruction sync on the game thread: advance the VDP + accept a pending
+ * IRQ exactly as the static path's sms_tick does (s == &g_z80). */
+static void    live_sync(Z80State *s){ (void)s; sms_sync(); }
+static const Bus g_live_bus = { live_r8, live_w8, live_in, live_out, live_call,
+                                &g_sync_deadline, live_sync, NULL };
 #endif
 
 void sms_dispatch_miss(uint16_t addr){

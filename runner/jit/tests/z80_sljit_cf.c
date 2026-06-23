@@ -21,6 +21,7 @@ static uint8_t bus_in(void *c, uint8_t p){ (void)c;(void)p; return 0xFF; }
 static void    bus_out(void *c, uint8_t p, uint8_t v){ (void)c;(void)p;(void)v; }
 static uint8_t sz_in (z80 *z, uint8_t p){ (void)z;(void)p; return 0xFF; }
 static void    sz_out(z80 *z, uint8_t p, uint8_t v){ (void)z;(void)p;(void)v; }
+static const uint64_t g_dl=(uint64_t)-1; static void h_sync(Z80State *s){ (void)s; }
 static uint8_t pack_f(const z80 *z){ return (uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|(z->xf<<3)|(z->pf<<2)|(z->nf<<1)|(z->cf)); }
 static void unpack_f(z80 *z, uint8_t f){ z->sf=(f>>7)&1;z->zf=(f>>6)&1;z->yf=(f>>5)&1;z->hf=(f>>4)&1;z->xf=(f>>3)&1;z->pf=(f>>2)&1;z->nf=(f>>1)&1;z->cf=f&1; }
 
@@ -87,7 +88,7 @@ int main(int argc, char **argv){
 
         ShardFn fn = z80_sljit_compile(&g_mem[base], 0x10000-base, base);
         if (!fn){ declined++; fprintf(stderr,"[cf] decline: %s @%04X\n", z80_sljit_last_decline.why, z80_sljit_last_decline.pc); continue; }
-        Bus bus={bus_r8,bus_w8,bus_in,bus_out,NULL,g_mem};
+        Bus bus={bus_r8,bus_w8,bus_in,bus_out,NULL,&g_dl,h_sync,g_mem};
         Z80State st=seed; st.cyc=0; fn(&st,&bus);
 
         z80 z; z80_init(&z);

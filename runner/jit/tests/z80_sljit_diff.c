@@ -27,6 +27,8 @@ static uint8_t bus_in(void *c, uint8_t p){ (void)c; (void)p; return 0xFF; }
 static void    bus_out(void *c, uint8_t p, uint8_t v){ (void)c; (void)p; (void)v; }
 static uint8_t sz_in (z80 *z, uint8_t p){ (void)z; (void)p; return 0xFF; }
 static void    sz_out(z80 *z, uint8_t p, uint8_t v){ (void)z; (void)p; (void)v; }
+static const uint64_t g_dl = (uint64_t)-1;   /* sync never fires in the harness */
+static void    h_sync(Z80State *s){ (void)s; }
 
 static uint8_t pack_f(const z80 *z){
     return (uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|
@@ -112,7 +114,7 @@ int main(int argc, char **argv){
         /* shard */
         ShardFn fn = z80_sljit_compile(&g_img[base], len, base);
         if (!fn){ declined++; fprintf(stderr,"[diff] unexpected decline (len=%zu)\n", len); continue; }
-        Bus busA = { bus_r8, bus_w8, bus_in, bus_out, NULL, g_A };
+        Bus busA = { bus_r8, bus_w8, bus_in, bus_out, NULL, &g_dl, h_sync, g_A };
         Z80State st = seed; st.cyc = 0;
         fn(&st, &busA);
 

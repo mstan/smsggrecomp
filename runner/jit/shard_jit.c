@@ -121,6 +121,9 @@ static uint8_t  g_memA[0x10000], g_memB[0x10000];     /* worker-private scratch 
 static uint8_t  vbus_r8 (void *c, uint16_t a){ return ((uint8_t*)c)[a]; }
 static void     vbus_w8 (void *c, uint16_t a, uint8_t v){ ((uint8_t*)c)[a] = v; }
 static uint8_t  vbus_in (void *c, uint8_t p){ (void)c; (void)p; return 0xFF; }
+/* off-thread validation freezes the VDP/IRQs: sync never fires, deadline never crossed */
+static const uint64_t g_frozen_deadline = (uint64_t)-1;
+static void     vbus_sync(Z80State *s){ (void)s; }
 
 static uint8_t pack_f(const z80 *z){
     return (uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|
@@ -173,7 +176,7 @@ static int validate(ShardFn fn, const Request *r){
     memcpy(g_memA, r->mem, sizeof g_memA);
     memcpy(g_memB, r->mem, sizeof g_memB);
     g_nA = g_nB = 0;
-    Bus busA = { vbus_r8, vbus_w8, vbus_in, busA_out, sandbox_call, g_memA };
+    Bus busA = { vbus_r8, vbus_w8, vbus_in, busA_out, sandbox_call, &g_frozen_deadline, vbus_sync, g_memA };
 
     Z80State sa = r->entry; sa.cyc = 0;
     fn(&sa, &busA);                                   /* shard runs to its RET */
@@ -265,7 +268,7 @@ static void jit_selftest(void){
     Z80State seed; memset(&seed,0,sizeof seed);
     seed.a=0x10; seed.b=0x01; seed.c=0x02; seed.d=0x03; seed.e=0x04; seed.h=0x55; seed.l=0x66; seed.sp=0x4000;
     static uint8_t m[0x10000]; memcpy(m, r->mem, sizeof m);
-    Bus bus = { vbus_r8, vbus_w8, vbus_in, busA_out, sandbox_call, m };
+    Bus bus = { vbus_r8, vbus_w8, vbus_in, busA_out, sandbox_call, &g_frozen_deadline, vbus_sync, m };
     Z80State st = seed; fn(&st, &bus);
     fprintf(stderr,
         "[jit-selftest] PASS: shard ran natively. A=%02X B=%02X C=%02X D=%02X E=%02X L=%02X cyc=%llu\n",

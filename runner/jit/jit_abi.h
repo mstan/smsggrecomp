@@ -20,6 +20,12 @@ typedef struct Bus {
     /* run the subroutine at `target` to its RET (live dispatcher, or superzazu on a
      * snapshot during off-thread validation), updating *s. */
     void    (*call  )(void *ctx, Z80State *s, uint16_t target);
+    /* per-instruction sync-first (mirrors sms_tick): the shard, before each op,
+     * does `if (s->cyc >= *sync_deadline) sync(s)`. Live: sync wraps sms_sync
+     * (advance VDP + accept IRQ). Off-thread validation: sync is a no-op and
+     * *sync_deadline is UINT64_MAX, so the VDP/IRQs stay frozen. (See SLJIT.md §8.5.) */
+    const uint64_t *sync_deadline;
+    void    (*sync )(Z80State *s);
     void    *ctx;
 } Bus;
 

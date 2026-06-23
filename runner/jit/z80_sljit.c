@@ -106,6 +106,24 @@ static void emit_tick(struct sljit_compiler *c, int n){
     sljit_emit_op1(c, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), OFF(cyc), SLJIT_R0, 0);
 }
 
+#define OFFB(field) ((sljit_sw)offsetof(Bus, field))
+
+/* sync-first, emitted BEFORE every instruction body (mirrors sms_tick):
+ *   if (s->cyc >= *bus->sync_deadline) bus->sync(s);   s->ei_block = 0;
+ * Live, bus->sync advances the VDP and accepts a pending IRQ at this boundary;
+ * off-thread validation freezes it (deadline = MAX, sync = no-op). */
+static void emit_sync(struct sljit_compiler *c){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), OFF(cyc));
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S1), OFFB(sync_deadline));
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R1), 0);   /* *sync_deadline */
+    struct sljit_jump *Jskip = sljit_emit_cmp(c, SLJIT_LESS, SLJIT_R0, 0, SLJIT_R1, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S1), OFFB(sync));
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_R2, 0);
+    sljit_set_label(Jskip, sljit_emit_label(c));
+    sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0), OFF(ei_block), SLJIT_IMM, 0);
+}
+
 /* CALL/RST: tick, push-ret + dispatch via z80h_call(s,bus,(ret<<16)|target); if the
  * callee unwound past this frame (return != 0) the shard returns, else falls through. */
 static void emit_call(struct sljit_compiler *c, uint16_t target, uint16_t ret, int cyc){
@@ -208,10 +226,10 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
     if ((op & 0xCF) == 0xC5){ emit_call_sbw(c,(void*)z80h_push,(op>>4)&3); emit_tick(c,11); return 1; }          /* PUSH rr  */
     if ((op & 0xCF) == 0xC1){ emit_call_sbw(c,(void*)z80h_pop ,(op>>4)&3); emit_tick(c,10); return 1; }          /* POP rr   */
 
-    /* OUT (op 0xD3) is emittable (z80h_out_n) and harness/gate-correct, but a routine
-     * doing device I/O runs a whole frame and crosses VDP sync / IRQ boundaries the
-     * shard's cyc model does not yet reproduce. Decline until the shard sync model lands
-     * (SLJIT.md) so we never publish a frame-spanning shard. */
+    /* OUT (0xD3) emittable + gate-correct, but re-declined: even with the P1f sync model,
+     * 0x8000 (the OUT-bearing frame routine) still diverges live — a DEEPER cause than sync
+     * (identical divergence with/without sync; suspect bank-aliased code or 1-pass-validation
+     * insufficiency). Keep OUT/CALL gated until that is root-caused. See SLJIT.md §8.5. */
 
     if (op == 0x2F){ emit_call_s(c,(void*)z80h_cpl);     emit_tick(c,4); return 1; }  /* CPL */
     if (op == 0x27){ emit_call_s(c,(void*)z80h_daa);     emit_tick(c,4); return 1; }  /* DAA */
@@ -331,11 +349,9 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                 g_work[wn++] = (uint16_t)(a + n);
                 break;
             case Z80_CF_CALL: case Z80_CF_CALL_COND:
-                /* CALL emit is correct (harness-verified), but a routine with CALL runs long
-                 * enough to cross VDP sync / IRQ boundaries, which the shard's cyc model does
-                 * not yet reproduce (emit_tick advances cyc but never calls sms_sync). Decline
-                 * until the shard sync model lands, so we never publish a frame-spanning shard. */
-                set_decl(a, &in, "CALL (needs shard sync model - see SLJIT.md)"); return NULL;
+                /* re-declined with OUT: frame-spanning routines (0x8000) still diverge live
+                 * for a cause deeper than sync — see the OUT note above and SLJIT.md §8.5. */
+                set_decl(a, &in, "CALL (frame routine diverges - deeper than sync; see SLJIT.md)"); return NULL;
             case Z80_CF_RET: default: break;                           /* terminator */
         }
     }
@@ -355,6 +371,8 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
         g_lab[rel] = sljit_emit_label(c);                  /* label every reachable insn */
         uint16_t ft = (uint16_t)(a + in.length);
         uint8_t op = in.opcode;
+
+        emit_sync(c);                                      /* sync-first, before the body (SLJIT.md §8.5) */
 
         if (in.cf == Z80_CF_NONE){
             if (!emit_one(c, &in)){ set_decl(a, &in, why_unsupported(&in)); sljit_free_compiler(c); return NULL; }

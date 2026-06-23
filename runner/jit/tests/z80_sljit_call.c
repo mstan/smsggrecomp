@@ -31,6 +31,7 @@ static void from_z(Z80State *s, const z80 *z){
     s->a=z->a;s->b=z->b;s->c=z->c;s->d=z->d;s->e=z->e;s->h=z->h;s->l=z->l; s->f=pack_f(z);
     s->ix=z->ix;s->iy=z->iy;s->sp=z->sp;s->i=z->i;s->r=z->r;s->iff1=z->iff1;s->iff2=z->iff2;s->im=z->interrupt_mode;s->halted=z->halted; s->wz=z->mem_ptr;
 }
+static const uint64_t g_dl=(uint64_t)-1; static void h_sync(Z80State *s){ (void)s; }
 /* bus->call: run the callee under superzazu on g_mem until it RETs */
 static void sb_call(void *ctx, Z80State *s, uint16_t target){
     z80 z; z80_init(&z);
@@ -72,7 +73,7 @@ int main(int argc, char **argv){
 
         ShardFn fn=z80_sljit_compile(&g_mem[main_a], 0x10000-main_a, main_a);
         if (!fn){ fprintf(stderr,"[call] decline: %s\n", z80_sljit_last_decline.why); fails++; continue; }
-        Bus bus={bus_r8,bus_w8,bus_in,bus_out,sb_call,g_mem};
+        Bus bus={bus_r8,bus_w8,bus_in,bus_out,sb_call,&g_dl,h_sync,g_mem};
         Z80State st=seed; st.cyc=0; fn(&st,&bus);
 
         z80 z; z80_init(&z);

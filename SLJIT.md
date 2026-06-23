@@ -297,10 +297,29 @@ there but diverges against the live, syncing static/interp path.
   live-correct **regardless** of what the frozen-snapshot validation can prove; the gate
   remains an emit-bug catcher, not a liveness guarantee.
 
-**Interim safety (committed):** OUT and CALL are *declined* in the emitter (they are the
-ops that let frame-spanning routines compile), so only short, non-sync-crossing routines
-shard — the game stays byte-exact. The OUT/CALL emit + gate handling are implemented and
-harness-verified; they re-enable once the sync model above lands.
+**P1f outcome — the sync model alone did NOT fix it.** The sync-first emit above is
+implemented (Bus `sync_deadline` + `sync`; live wraps `sms_sync`, off-thread is a no-op;
+all harnesses still pass). But re-enabling OUT/CALL with the sync model live, `0x8000`
+still diverged **identically** (VRAM/CRAM/REG 23/34/72% — bit-for-bit the same failure as
+without sync). So sync is necessary but **not the (whole) cause**. Remaining suspects for
+the `0x8000` divergence, to investigate next:
+- **Bank-aliased code.** `0x8000` is a *bank-dispatched* dispatch-miss; the bytes at
+  `$8000` depend on the mapped ROM bank. The shard table currently keys on address only
+  (no `code_crc` check), so a shard compiled for one bank could run when a different bank
+  is mapped → wrong code. Add the `code_crc` re-check before native dispatch (the spec's
+  candidate-chain disambiguation, §4) and see if `0x8000` stops matching.
+- **1-pass validation insufficiency.** Promote only after **K consecutive-clean** snapshots
+  (the spec's K=8), and verify against the live run, not just one frozen snapshot.
+- **Frozen-snapshot unsoundness for frame routines.** A whole-frame routine's behavior
+  depends on mid-routine IRQs whose handlers read *live* device state (V-counter / VDP
+  status via `IN`); the frozen snapshot can't reproduce that, so such routines may be
+  fundamentally un-validatable off-thread and should be **pinned to interp**.
+
+**Interim safety (committed):** OUT and CALL stay *declined* (they are what let
+frame-spanning routines compile), so only short, non-sync-crossing routines shard and the
+game is byte-exact (CRAM/REG 100%, verified). The sync model + OUT/CALL emit + gate
+handling are all implemented and harness-verified, gated off pending the investigation
+above.
 
 ---
 
