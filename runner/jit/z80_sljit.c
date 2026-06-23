@@ -38,6 +38,42 @@ static void emit_alu_call(struct sljit_compiler *c, void *fn){
     sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM, (sljit_sw)fn);
 }
 
+/* memory/16-bit helper call shapes (S0=Z80State*, S1=Bus*) */
+extern void z80h_ld_r_hl(Z80State*,const Bus*,long), z80h_ld_hl_r(Z80State*,const Bus*,long),
+            z80h_ld_hl_n(Z80State*,const Bus*,long), z80h_ld_a_bc(Z80State*,const Bus*),
+            z80h_ld_a_de(Z80State*,const Bus*), z80h_ld_a_nn(Z80State*,const Bus*,long),
+            z80h_ld_bc_a(Z80State*,const Bus*), z80h_ld_de_a(Z80State*,const Bus*),
+            z80h_ld_nn_a(Z80State*,const Bus*,long), z80h_ld_rr(Z80State*,long,long),
+            z80h_inc_rr(Z80State*,long), z80h_dec_rr(Z80State*,long), z80h_add_hl(Z80State*,long),
+            z80h_push(Z80State*,const Bus*,long), z80h_pop(Z80State*,const Bus*,long);
+
+/* void h(Z80State*, const Bus*, long w) */
+static void emit_call_sbw(struct sljit_compiler *c, void *fn, sljit_sw w){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, w);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS3V(P, P, W), SLJIT_IMM, (sljit_sw)fn);
+}
+/* void h(Z80State*, const Bus*) */
+static void emit_call_sb(struct sljit_compiler *c, void *fn){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS2V(P, P), SLJIT_IMM, (sljit_sw)fn);
+}
+/* void h(Z80State*, long w) */
+static void emit_call_sw(struct sljit_compiler *c, void *fn, sljit_sw w){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, w);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM, (sljit_sw)fn);
+}
+/* void h(Z80State*, long w1, long w2) */
+static void emit_call_sww(struct sljit_compiler *c, void *fn, sljit_sw w1, sljit_sw w2){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, w1);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, w2);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS3V(P, W, W), SLJIT_IMM, (sljit_sw)fn);
+}
+
 #define OFF(field) ((sljit_sw)offsetof(Z80State, field))
 
 /* Z80 r-table index (0=B 1=C 2=D 3=E 4=H 5=L 6=(HL) 7=A) -> Z80State byte offset,
@@ -75,11 +111,12 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
         return 1;
     }
 
-    if (op >= 0x40 && op <= 0x7F && op != 0x76){       /* LD r,r' */
-        sljit_sw od = reg8_off((op >> 3) & 7), os = reg8_off(op & 7);
-        if (od < 0 || os < 0) return 0;                /* (HL) operand */
-        sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), os);
-        sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0), od, SLJIT_R0, 0);
+    if (op >= 0x40 && op <= 0x7F && op != 0x76){       /* LD r,r' / r,(HL) / (HL),r */
+        int dst = (op >> 3) & 7, src = op & 7;
+        if (dst == 6){ emit_call_sbw(c, (void*)z80h_ld_hl_r, src); emit_tick(c, 7); return 1; }
+        if (src == 6){ emit_call_sbw(c, (void*)z80h_ld_r_hl, dst); emit_tick(c, 7); return 1; }
+        sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), reg8_off(src));
+        sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0), reg8_off(dst), SLJIT_R0, 0);
         emit_tick(c, 4);
         return 1;
     }
@@ -129,6 +166,22 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
         emit_tick(c, 4);
         return 1;
     }
+
+    /* ---- P1c: memory + 16-bit + stack (all via the Bus) ---- */
+    if (op == 0x36){ emit_call_sbw(c,(void*)z80h_ld_hl_n, in->imm & 0xFF); emit_tick(c,10); return 1; }
+    if (op == 0x0A){ emit_call_sb (c,(void*)z80h_ld_a_bc); emit_tick(c,7);  return 1; }
+    if (op == 0x1A){ emit_call_sb (c,(void*)z80h_ld_a_de); emit_tick(c,7);  return 1; }
+    if (op == 0x02){ emit_call_sb (c,(void*)z80h_ld_bc_a); emit_tick(c,7);  return 1; }
+    if (op == 0x12){ emit_call_sb (c,(void*)z80h_ld_de_a); emit_tick(c,7);  return 1; }
+    if (op == 0x3A){ emit_call_sbw(c,(void*)z80h_ld_a_nn, in->imm); emit_tick(c,13); return 1; }
+    if (op == 0x32){ emit_call_sbw(c,(void*)z80h_ld_nn_a, in->imm); emit_tick(c,13); return 1; }
+
+    if ((op & 0xCF) == 0x01){ emit_call_sww(c,(void*)z80h_ld_rr,(op>>4)&3, in->imm); emit_tick(c,10); return 1; } /* LD rr,nn */
+    if ((op & 0xCF) == 0x03){ emit_call_sw (c,(void*)z80h_inc_rr,(op>>4)&3); emit_tick(c,6);  return 1; }        /* INC rr   */
+    if ((op & 0xCF) == 0x0B){ emit_call_sw (c,(void*)z80h_dec_rr,(op>>4)&3); emit_tick(c,6);  return 1; }        /* DEC rr   */
+    if ((op & 0xCF) == 0x09){ emit_call_sw (c,(void*)z80h_add_hl,(op>>4)&3); emit_tick(c,11); return 1; }        /* ADD HL,rr*/
+    if ((op & 0xCF) == 0xC5){ emit_call_sbw(c,(void*)z80h_push,(op>>4)&3); emit_tick(c,11); return 1; }          /* PUSH rr  */
+    if ((op & 0xCF) == 0xC1){ emit_call_sbw(c,(void*)z80h_pop ,(op>>4)&3); emit_tick(c,10); return 1; }          /* POP rr   */
 
     return 0;                                          /* unsupported -> decline */
 }
