@@ -615,11 +615,91 @@ static int ff_seed_jt(const SmsRom *rom, FuncList *fl, const TraceResult *t, int
     return seeded;
 }
 
+/* ---- RAM dispatch-vector discovery ----
+ * Sonic's engine installs per-state handler addresses into fixed RAM slots and
+ * dispatches indirectly: `ld hl,IMM ; ld (slot),hl` to install, then `ld hl,
+ * (slot) ; jp (hl)` to run. Static CALL/JP tracing can't follow the indirection
+ * (the target is only in RAM at runtime), so the handlers were dispatch misses.
+ * We recover them in two monotonic facts, both proven from ROM (PRINCIPLES #16):
+ *   1. A `jp (hl)` whose HL was last loaded by `ld hl,(nn)` with nn in RAM proves
+ *      nn is a DISPATCH SLOT (an indirect jump vector).
+ *   2. A `ld (nn),rr` into a dispatch slot, whose rr was last loaded with a code-
+ *      address immediate, installs that immediate as a handler -> seed it.
+ * Precision: only immediates provably installed into provably-dispatched slots
+ * are seeded; a plain `ld hl,imm` to a data pointer is never touched. */
+static uint16_t g_disp_slot[256];
+static int g_disp_slot_n;
+static bool is_disp_slot(uint16_t a){
+    for (int i=0;i<g_disp_slot_n;i++) if (g_disp_slot[i]==a) return true;
+    return false;
+}
+static bool add_disp_slot(uint16_t a){
+    if (is_disp_slot(a)) return false;
+    if (g_disp_slot_n < (int)(sizeof g_disp_slot/sizeof g_disp_slot[0])){
+        g_disp_slot[g_disp_slot_n++]=a; return true;
+    }
+    return false;
+}
+/* Byte-contiguous back-walk from insn k to the most recent writer of HL; if that
+ * writer is `ld hl,(nn)` (op 0x2A) with nn in RAM, register nn as a dispatch slot.
+ * Returns true if a NEW slot was registered. */
+static bool detect_disp_slot(const TraceResult *t, int k){
+    int i=k-1; uint16_t exp=t->insns[k].addr;
+    while (i>=0){
+        const TracedInsn *c=&t->insns[i];
+        if ((uint16_t)(c->addr+c->insn.length)!=exp) return false;   /* not contiguous */
+        if (insn_writes_rp(&c->insn,2)){                              /* first HL writer */
+            const Z80Insn *in=&c->insn;
+            if (in->prefix==Z80_PFX_NONE && in->opcode==0x2A &&
+                in->imm_bits==16 && in->imm>=0xC000)
+                return add_disp_slot((uint16_t)in->imm);
+            return false;
+        }
+        exp=c->addr; i--;
+    }
+    return false;
+}
+/* At a `ld (nn),rr` store into a known dispatch slot, recover the code-address
+ * immediate last loaded into rr (by `ld rr,imm`) and seed it as a handler entry.
+ * Returns the number of newly-seeded entries (0 or 1). */
+static int seed_vector_install(const SmsRom *rom, FuncList *fl, const TraceResult *t,
+                               int k, const BankState *bs, const uint16_t *bl, int bln){
+    const Z80Insn *st=&t->insns[k].insn;
+    int preg; uint8_t ldop;
+    if (st->prefix==Z80_PFX_NONE && st->opcode==0x22){ preg=2; ldop=0x21; }       /* ld (nn),hl */
+    else if (st->prefix==Z80_PFX_ED && st->opcode==0x43){ preg=0; ldop=0x01; }    /* ld (nn),bc */
+    else if (st->prefix==Z80_PFX_ED && st->opcode==0x53){ preg=1; ldop=0x11; }    /* ld (nn),de */
+    else return 0;
+    if (st->imm_bits!=16 || !is_disp_slot((uint16_t)st->imm)) return 0;
+    int i=k-1; uint16_t exp=t->insns[k].addr;
+    while (i>=0){
+        const TracedInsn *c=&t->insns[i];
+        if ((uint16_t)(c->addr+c->insn.length)!=exp) return 0;        /* not contiguous */
+        const Z80Insn *in=&c->insn;
+        if (in->prefix==Z80_PFX_NONE && in->opcode==ldop && in->imm_bits==16){
+            uint16_t imm=(uint16_t)in->imm;
+            if (imm>=0xC000) return 0;                                /* RAM target: not code */
+            if (in_blacklist(bl,bln,imm)) return 0;
+            int b;
+            if (!bankstate_target(bs,imm,&b)) return 0;               /* defer runtime-unknown bank */
+            if (funclist_find(fl,imm,b)<0){
+                funclist_add(fl,imm,b,NULL,FUNC_SRC_TABLE,true); return 1;
+            }
+            return 0;
+        }
+        if (insn_writes_rp(in,preg)) return 0;                        /* rr redefined otherwise: give up */
+        exp=c->addr; i--;
+    }
+    return 0;
+}
+
 void ff_discover(const SmsRom *rom, FuncList *fl,
                  const uint16_t *blacklist, int blacklist_count){
     /* Iterate to a fixpoint: trace every known entry, harvest CALL targets as
      * new entries, repeat until no new entries appear. */
     int jt_seeded = 0;
+    int vec_seeded = 0;
+    g_disp_slot_n = 0;          /* dispatch slots accumulate monotonically below */
     bool changed = true;
     int guard = 0;
     while (changed && guard++ < 64){
@@ -660,6 +740,16 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                 if (is_computed_jp(in)){
                     int s = ff_seed_jt(rom, fl, &tr, k, &bs, blacklist, blacklist_count);
                     if (s>0){ jt_seeded += s; changed=true; }
+                    /* RAM-vector dispatch: if HL came from `ld hl,(slot)`, record
+                     * the slot so installs into it (below) seed their handlers. */
+                    if (detect_disp_slot(&tr, k)) changed=true;
+                }
+                /* RAM-vector install: `ld rr,imm ; ld (slot),rr` into a known
+                 * dispatch slot installs a handler -> seed the immediate. */
+                if ((in->prefix==Z80_PFX_NONE && in->opcode==0x22) ||
+                    (in->prefix==Z80_PFX_ED && (in->opcode==0x43||in->opcode==0x53))){
+                    int s = seed_vector_install(rom, fl, &tr, k, &bs, blacklist, blacklist_count);
+                    if (s>0){ vec_seeded += s; changed=true; }
                 }
                 bool is_call = (in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND);
                 bool is_tailjump = (in->cf==Z80_CF_JUMP && in->has_target &&
@@ -683,4 +773,7 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
     if (g_data_iv_n || jt_seeded)
         printf("[SmsRecomp] auto jump-tables: %d table(s), %d target(s) seeded\n",
                g_data_iv_n, jt_seeded);
+    if (g_disp_slot_n || vec_seeded)
+        printf("[SmsRecomp] RAM dispatch vectors: %d slot(s), %d handler(s) seeded\n",
+               g_disp_slot_n, vec_seeded);
 }
