@@ -20,6 +20,7 @@
 #include "external/superzazu/z80.h"
 #include "png_write.h"
 #include "audio/sn76489.h"
+#include "jit/shard_jit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -833,6 +834,17 @@ void glue_diff_init(void){
 
 /* ====================== dispatch miss ====================== */
 void sms_dispatch_miss(uint16_t addr){
+#ifdef SMS_HAVE_JIT
+    /* Tier 2: if a trusted shard exists, run it natively and return. Otherwise
+     * enqueue an async compile request (non-blocking, deduped — the worker thread
+     * does all compilation/validation) and fall through to the interpreter this
+     * time. NEVER blocks the game thread (SLJIT.md §2). */
+    {
+        ShardFn _sh = sms_jit_lookup(addr);
+        if (_sh){ _sh(&g_z80); return; }
+        sms_jit_request(addr);
+    }
+#endif
     /* Log each newly-seen miss once - this is the static-analysis worklist
      * (PRINCIPLES #16): every address here is a computed target the finder
      * should ideally resolve statically. The hybrid below is the robust
@@ -936,10 +948,12 @@ void glue_run_interp(void){
 
 void glue_run(void){
     g_running = true;
+    sms_jit_init();                      /* start the Tier-2 shard worker (no-op unless -DSMS_HAVE_JIT) */
     if (setjmp(g_quit_env) == 0){
         call_by_address(0x0000);         /* reset entry; runs the game */
         /* If we get here the reset routine RETurned (unusual) - just stop. */
     }
+    sms_jit_shutdown();
     g_running = false;
     fprintf(stderr, "[timing] frames=%llu irq_taken=%llu (reentrant=%llu) "
             "irq/frame=%.2f sync_maxdepth=%d\n",
