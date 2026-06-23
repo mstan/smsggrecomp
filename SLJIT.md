@@ -263,6 +263,47 @@ game thread.
 
 ---
 
+## 8.5 The shard sync model (CRITICAL — discovered in P1e)
+
+A shard must replicate what the static path's `sms_tick()` does, not just bump `cyc`.
+
+In the static corpus, every instruction calls `sms_tick(n)`, which is **sync-first**:
+`if (cyc >= g_sync_deadline) sms_sync(); cyc += n;`. `sms_sync()` advances the VDP to
+the current cycle and **accepts a pending IRQ** (`take_irq` → the IM1 handler) at the
+instruction boundary. The interpreter does the same per step. **A correct shard must
+do this too** — otherwise, for any routine that runs long enough to cross a scanline /
+IRQ boundary, the VDP never advances and interrupts never fire mid-routine, and the
+shard's behavior (and the whole frame's timing) diverges from the oracle.
+
+P1e proved this the hard way: `0x8000` (Sonic Blast's per-frame main routine) compiled
+and **validated byte-exact off-thread**, then broke the game live (CRAM/REG fell to
+~34%/72%). The shard's `emit_tick` only did `cyc += n`. Short shards (e.g. `0x0DE8` =
+a bare RET) never cross a deadline, so they stayed correct; `0x8000` runs a whole frame
+and crosses many. **The off-thread gate cannot catch this**: validation runs on a
+*frozen* snapshot (VDP/IRQs disabled), so the no-sync shard matches the no-sync oracle
+there but diverges against the live, syncing static/interp path.
+
+**Design for the fix (next milestone, before re-enabling OUT/CALL):**
+- `emit_tick` must emit, per instruction, the sync-first sequence routed through the
+  `Bus`: `if (cyc >= *bus->sync_deadline) bus->sync(s); cyc += n; s->ei_block = 0;`.
+  Live `bus->sync` = a wrapper over `sms_sync()` (advance VDP + `take_irq`); the
+  off-thread validation `bus->sync` is a no-op with `sync_deadline = UINT64_MAX` (VDP
+  frozen). Add `sync_deadline` (a `uint64_t*`) and `sync` to the `Bus`.
+- The tick must precede the instruction body (sync-first), matching the static path's
+  IRQ-sampling phase — i.e. emit the tick *before* each op's effect, not after (the
+  current emitter ticks after). This is the same sync-first contract as
+  `[[timing-model-sync-first-and-real-pc-push]]`.
+- Because the live shard syncs identically to the static path, a correct emit is
+  live-correct **regardless** of what the frozen-snapshot validation can prove; the gate
+  remains an emit-bug catcher, not a liveness guarantee.
+
+**Interim safety (committed):** OUT and CALL are *declined* in the emitter (they are the
+ops that let frame-spanning routines compile), so only short, non-sync-crossing routines
+shard — the game stays byte-exact. The OUT/CALL emit + gate handling are implemented and
+harness-verified; they re-enable once the sync model above lands.
+
+---
+
 ## 9. Reused verbatim vs. new
 
 **Reused (no per-ISA work):**

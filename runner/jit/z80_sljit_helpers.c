@@ -71,4 +71,33 @@ void z80h_pop(Z80State *s, const Bus *b, long p2){
     s->sp=(uint16_t)(s->sp+2);
     switch(p2){case 0:z80_set_bc(s,v);break;case 1:z80_set_de(s,v);break;case 2:z80_set_hl(s,v);break;default:z80_set_af(s,v);break;} }
 
+/* ---- accumulator/flag misc + register exchanges ---- */
+void z80h_cpl(Z80State *s){ z80_cpl(s); }
+void z80h_daa(Z80State *s){ z80_daa(s); }
+void z80h_scf(Z80State *s){ z80_scf(s); }
+void z80h_ccf(Z80State *s){ z80_ccf(s); }
+void z80h_ex_af  (Z80State *s){ uint8_t t; t=s->a;s->a=s->a_;s->a_=t; t=s->f;s->f=s->f_;s->f_=t; }
+void z80h_ex_dehl(Z80State *s){ uint8_t t; t=s->d;s->d=s->h;s->h=t; t=s->e;s->e=s->l;s->l=t; }
+void z80h_exx(Z80State *s){ uint8_t t;
+    t=s->b;s->b=s->b_;s->b_=t; t=s->c;s->c=s->c_;s->c_=t; t=s->d;s->d=s->d_;s->d_=t;
+    t=s->e;s->e=s->e_;s->e_=t; t=s->h;s->h=s->h_;s->h_=t; t=s->l;s->l=s->l_;s->l_=t; }
+
+/* ---- I/O + CALL ---- */
+void z80h_out_n(Z80State *s, const Bus *b, long n){ b->io_out(b->ctx, (uint8_t)n, s->a); }
+
+/* CALL/RST: push the return address, run the callee via the bus, and report whether
+ * the callee unwound PAST this frame (the shard must then return too — the computed-
+ * call propagation contract). The bus->call runs the callee on the live dispatcher
+ * (game thread) or under superzazu on the snapshot (off-thread validation). */
+long z80h_call(Z80State *s, const Bus *b, long target_ret){
+    uint16_t target = (uint16_t)(target_ret & 0xFFFF);
+    uint16_t ret    = (uint16_t)((target_ret >> 16) & 0xFFFF);
+    uint16_t csp = s->sp;
+    s->sp = (uint16_t)(s->sp - 2);
+    b->write8(b->ctx, s->sp, (uint8_t)ret);
+    b->write8(b->ctx, (uint16_t)(s->sp + 1), (uint8_t)(ret >> 8));
+    b->call(b->ctx, s, target);
+    return (int16_t)(s->sp - csp) > 0;   /* nonzero => callee returned past us */
+}
+
 #endif /* SMS_HAVE_JIT */

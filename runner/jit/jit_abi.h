@@ -17,6 +17,9 @@ typedef struct Bus {
     void    (*write8)(void *ctx, uint16_t addr, uint8_t val);
     uint8_t (*io_in )(void *ctx, uint8_t port);
     void    (*io_out)(void *ctx, uint8_t port, uint8_t val);
+    /* run the subroutine at `target` to its RET (live dispatcher, or superzazu on a
+     * snapshot during off-thread validation), updating *s. */
+    void    (*call  )(void *ctx, Z80State *s, uint16_t target);
     void    *ctx;
 } Bus;
 

@@ -51,7 +51,7 @@ int main(int argc, char **argv){
         size_t len = 0;
         int dr, sr, g, pp;
         for (int k = 0; k < count; k++){
-            switch (rand() % 21){
+            switch (rand() % 28){
                 case 0:  g_img[base+len++]=0x00; break;                                  /* NOP       */
                 case 1:  dr=SUP_REG[rand()%7]; sr=SUP_REG[rand()%7];
                          g_img[base+len++]=(uint8_t)(0x40|(dr<<3)|sr); break;             /* LD r,r'   */
@@ -82,6 +82,13 @@ int main(int argc, char **argv){
                 case 18: pp=rand()%4; g_img[base+len++]=(uint8_t)(0x09|(pp<<4)); break;   /* ADD HL,rr */
                 case 19: pp=rand()%4; g_img[base+len++]=(uint8_t)(0xC5|(pp<<4)); break;   /* PUSH rr   */
                 case 20: pp=rand()%4; g_img[base+len++]=(uint8_t)(0xC1|(pp<<4)); break;   /* POP rr    */
+                case 21: g_img[base+len++]=0x2F; break;                                  /* CPL       */
+                case 22: g_img[base+len++]=0x27; break;                                  /* DAA       */
+                case 23: g_img[base+len++]=0x37; break;                                  /* SCF       */
+                case 24: g_img[base+len++]=0x3F; break;                                  /* CCF       */
+                case 25: g_img[base+len++]=0x08; break;                                  /* EX AF,AF' */
+                case 26: g_img[base+len++]=0xEB; break;                                  /* EX DE,HL  */
+                case 27: g_img[base+len++]=0xD9; break;                                  /* EXX       */
             }
         }
         g_img[base+len++] = 0xC9;        /* RET */
@@ -92,6 +99,10 @@ int main(int argc, char **argv){
         seed.b=0xD1; seed.c=rand();
         seed.d=0xD2; seed.e=rand();
         seed.h=0xD0; seed.l=rand();
+        seed.a_=rand(); seed.f_=rand();        /* shadow set (EX AF,AF' / EXX); pointers kept safe */
+        seed.b_=0xD1; seed.c_=rand();
+        seed.d_=0xD2; seed.e_=rand();
+        seed.h_=0xD0; seed.l_=rand();
         seed.ix=rand(); seed.iy=rand();
         seed.sp=0xCF00;
 
@@ -101,7 +112,7 @@ int main(int argc, char **argv){
         /* shard */
         ShardFn fn = z80_sljit_compile(&g_img[base], len, base);
         if (!fn){ declined++; fprintf(stderr,"[diff] unexpected decline (len=%zu)\n", len); continue; }
-        Bus busA = { bus_r8, bus_w8, bus_in, bus_out, g_A };
+        Bus busA = { bus_r8, bus_w8, bus_in, bus_out, NULL, g_A };
         Z80State st = seed; st.cyc = 0;
         fn(&st, &busA);
 
@@ -109,6 +120,7 @@ int main(int argc, char **argv){
         z80 z; z80_init(&z);
         z.read_byte=bus_r8; z.write_byte=bus_w8; z.port_in=sz_in; z.port_out=sz_out; z.userdata=g_B;
         z.a=seed.a; z.b=seed.b; z.c=seed.c; z.d=seed.d; z.e=seed.e; z.h=seed.h; z.l=seed.l;
+        z.a_=seed.a_; z.b_=seed.b_; z.c_=seed.c_; z.d_=seed.d_; z.e_=seed.e_; z.h_=seed.h_; z.l_=seed.l_; z.f_=seed.f_;
         z.ix=seed.ix; z.iy=seed.iy; z.sp=seed.sp; z.pc=base; z.cyc=0;
         unpack_f(&z, seed.f);
         for (int s = 0; s < count + 1; s++) z80_step(&z);

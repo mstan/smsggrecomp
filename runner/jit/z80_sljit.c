@@ -26,6 +26,14 @@ extern void z80h_and(Z80State *s, long v), z80h_xor(Z80State *s, long v);
 extern void z80h_or (Z80State *s, long v), z80h_cp (Z80State *s, long v);
 extern void z80h_rlca(Z80State *s), z80h_rrca(Z80State *s);
 extern void z80h_rla (Z80State *s), z80h_rra (Z80State *s);
+extern void z80h_cpl(Z80State*), z80h_daa(Z80State*), z80h_scf(Z80State*), z80h_ccf(Z80State*);
+extern void z80h_ex_af(Z80State*), z80h_ex_dehl(Z80State*), z80h_exx(Z80State*);
+
+/* call void h(Z80State*) */
+static void emit_call_s(struct sljit_compiler *c, void *fn){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, (sljit_sw)fn);
+}
 
 /* indexed by the Z80 ALU group (y field): ADD ADC SUB SBC AND XOR OR CP */
 static void *const ALU_HELP[8] = {
@@ -46,7 +54,9 @@ extern void z80h_ld_r_hl(Z80State*,const Bus*,long), z80h_ld_hl_r(Z80State*,cons
             z80h_ld_bc_a(Z80State*,const Bus*), z80h_ld_de_a(Z80State*,const Bus*),
             z80h_ld_nn_a(Z80State*,const Bus*,long), z80h_ld_rr(Z80State*,long,long),
             z80h_inc_rr(Z80State*,long), z80h_dec_rr(Z80State*,long), z80h_add_hl(Z80State*,long),
-            z80h_push(Z80State*,const Bus*,long), z80h_pop(Z80State*,const Bus*,long);
+            z80h_push(Z80State*,const Bus*,long), z80h_pop(Z80State*,const Bus*,long),
+            z80h_out_n(Z80State*,const Bus*,long);
+extern long z80h_call(Z80State*,const Bus*,long);
 
 /* void h(Z80State*, const Bus*, long w) */
 static void emit_call_sbw(struct sljit_compiler *c, void *fn, sljit_sw w){
@@ -94,6 +104,20 @@ static void emit_tick(struct sljit_compiler *c, int n){
     sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), OFF(cyc));
     sljit_emit_op2(c, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, n);
     sljit_emit_op1(c, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), OFF(cyc), SLJIT_R0, 0);
+}
+
+/* CALL/RST: tick, push-ret + dispatch via z80h_call(s,bus,(ret<<16)|target); if the
+ * callee unwound past this frame (return != 0) the shard returns, else falls through. */
+static void emit_call(struct sljit_compiler *c, uint16_t target, uint16_t ret, int cyc){
+    emit_tick(c, cyc);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, ((sljit_sw)ret << 16) | target);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS3(W, P, P, W), SLJIT_IMM, (sljit_sw)z80h_call);
+    sljit_emit_op2(c, SLJIT_AND | SLJIT_SET_Z, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R0, 0);
+    struct sljit_jump *Jc = sljit_emit_jump(c, SLJIT_ZERO);   /* no propagation -> continue */
+    sljit_emit_return_void(c);                                /* propagation -> return */
+    sljit_set_label(Jc, sljit_emit_label(c));
 }
 
 /* Emit one instruction. Returns 1 if emitted, 0 to decline the whole function. */
@@ -183,6 +207,26 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
     if ((op & 0xCF) == 0x09){ emit_call_sw (c,(void*)z80h_add_hl,(op>>4)&3); emit_tick(c,11); return 1; }        /* ADD HL,rr*/
     if ((op & 0xCF) == 0xC5){ emit_call_sbw(c,(void*)z80h_push,(op>>4)&3); emit_tick(c,11); return 1; }          /* PUSH rr  */
     if ((op & 0xCF) == 0xC1){ emit_call_sbw(c,(void*)z80h_pop ,(op>>4)&3); emit_tick(c,10); return 1; }          /* POP rr   */
+
+    /* OUT (op 0xD3) is emittable (z80h_out_n) and harness/gate-correct, but a routine
+     * doing device I/O runs a whole frame and crosses VDP sync / IRQ boundaries the
+     * shard's cyc model does not yet reproduce. Decline until the shard sync model lands
+     * (SLJIT.md) so we never publish a frame-spanning shard. */
+
+    if (op == 0x2F){ emit_call_s(c,(void*)z80h_cpl);     emit_tick(c,4); return 1; }  /* CPL */
+    if (op == 0x27){ emit_call_s(c,(void*)z80h_daa);     emit_tick(c,4); return 1; }  /* DAA */
+    if (op == 0x37){ emit_call_s(c,(void*)z80h_scf);     emit_tick(c,4); return 1; }  /* SCF */
+    if (op == 0x3F){ emit_call_s(c,(void*)z80h_ccf);     emit_tick(c,4); return 1; }  /* CCF */
+    if (op == 0x08){ emit_call_s(c,(void*)z80h_ex_af);   emit_tick(c,4); return 1; }  /* EX AF,AF' */
+    if (op == 0xEB){ emit_call_s(c,(void*)z80h_ex_dehl); emit_tick(c,4); return 1; }  /* EX DE,HL */
+    if (op == 0xD9){ emit_call_s(c,(void*)z80h_exx);     emit_tick(c,4); return 1; }  /* EXX */
+    if (op == 0xF3){ sljit_emit_op1(c,SLJIT_MOV_U8,SLJIT_MEM1(SLJIT_S0),OFF(iff1),SLJIT_IMM,0);  /* DI */
+                     sljit_emit_op1(c,SLJIT_MOV_U8,SLJIT_MEM1(SLJIT_S0),OFF(iff2),SLJIT_IMM,0);
+                     emit_tick(c,4); return 1; }
+    if (op == 0xFB){ sljit_emit_op1(c,SLJIT_MOV_U8,SLJIT_MEM1(SLJIT_S0),OFF(iff1),SLJIT_IMM,1);  /* EI */
+                     sljit_emit_op1(c,SLJIT_MOV_U8,SLJIT_MEM1(SLJIT_S0),OFF(iff2),SLJIT_IMM,1);
+                     sljit_emit_op1(c,SLJIT_MOV_U8,SLJIT_MEM1(SLJIT_S0),OFF(ei_block),SLJIT_IMM,1);
+                     emit_tick(c,4); return 1; }
 
     return 0;                                          /* unsupported -> decline */
 }
@@ -286,8 +330,12 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                 g_work[wn++] = in.target;
                 g_work[wn++] = (uint16_t)(a + n);
                 break;
-            case Z80_CF_CALL: case Z80_CF_CALL_COND:                   /* not in P1d (no CALL yet) */
-                set_decl(a, &in, cf_reason(in.cf)); return NULL;
+            case Z80_CF_CALL: case Z80_CF_CALL_COND:
+                /* CALL emit is correct (harness-verified), but a routine with CALL runs long
+                 * enough to cross VDP sync / IRQ boundaries, which the shard's cyc model does
+                 * not yet reproduce (emit_tick advances cyc but never calls sms_sync). Decline
+                 * until the shard sync model lands, so we never publish a frame-spanning shard. */
+                set_decl(a, &in, "CALL (needs shard sync model - see SLJIT.md)"); return NULL;
             case Z80_CF_RET: default: break;                           /* terminator */
         }
     }
@@ -359,6 +407,19 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                     struct sljit_jump *Jt = sljit_emit_jump(c, jt);
                     g_pend[np].j = Jt; g_pend[np++].target = in.target;  /* fall through naturally */
                 }
+                break;
+            }
+            case Z80_CF_CALL:                                   /* CALL nn / RST n */
+                emit_call(c, in.target, (uint16_t)(a + in.length), op == 0xCD ? 17 : 11);
+                break;
+            case Z80_CF_CALL_COND: {                            /* CALL cc,nn (17 taken / 10 not-taken) */
+                sljit_s32 jt = emit_cc(c, (op>>3)&7);
+                struct sljit_jump *Jt = sljit_emit_jump(c, jt);
+                emit_tick(c, 10);
+                struct sljit_jump *Js = sljit_emit_jump(c, SLJIT_JUMP);
+                g_pend[np].j = Js; g_pend[np++].target = ft;
+                sljit_set_label(Jt, sljit_emit_label(c));
+                emit_call(c, in.target, (uint16_t)(a + in.length), 17);
                 break;
             }
             default:

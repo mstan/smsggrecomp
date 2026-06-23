@@ -121,10 +121,6 @@ static uint8_t  g_memA[0x10000], g_memB[0x10000];     /* worker-private scratch 
 static uint8_t  vbus_r8 (void *c, uint16_t a){ return ((uint8_t*)c)[a]; }
 static void     vbus_w8 (void *c, uint16_t a, uint8_t v){ ((uint8_t*)c)[a] = v; }
 static uint8_t  vbus_in (void *c, uint8_t p){ (void)c; (void)p; return 0xFF; }
-static void     vbus_out(void *c, uint8_t p, uint8_t v){ (void)c; (void)p; (void)v; }
-/* superzazu's port callbacks take z80*, not void* */
-static uint8_t  sz_in (z80 *z, uint8_t p){ (void)z; (void)p; return 0xFF; }
-static void     sz_out(z80 *z, uint8_t p, uint8_t v){ (void)z; (void)p; (void)v; }
 
 static uint8_t pack_f(const z80 *z){
     return (uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|
@@ -135,35 +131,66 @@ static void unpack_f(z80 *z, uint8_t f){
     z->xf=(f>>3)&1; z->pf=(f>>2)&1; z->nf=(f>>1)&1; z->cf=f&1;
 }
 
+/* port-write logs: OUT is compared (not applied) since there is no live device
+ * off-thread. The shard side (incl. its callees) logs to A, the oracle to B. */
+typedef struct { uint8_t port, val; } IoEv;
+static IoEv g_ioA[8192], g_ioB[8192];
+static int  g_nA, g_nB;
+static void busA_out(void *c, uint8_t p, uint8_t v){ (void)c; if (g_nA<8192){ g_ioA[g_nA].port=p; g_ioA[g_nA].val=v; g_nA++; } }
+static void szA_out (z80 *z, uint8_t p, uint8_t v){ (void)z; busA_out(0,p,v); }
+static void szB_out (z80 *z, uint8_t p, uint8_t v){ (void)z; if (g_nB<8192){ g_ioB[g_nB].port=p; g_ioB[g_nB].val=v; g_nB++; } }
+static uint8_t sz_in (z80 *z, uint8_t p){ (void)z; (void)p; return 0xFF; }
+
+/* Z80State <-> superzazu (mirrors glue.c state_to_hz/from_hz) */
+static void to_z(z80 *z, const Z80State *s){
+    z->a=s->a; z->b=s->b; z->c=s->c; z->d=s->d; z->e=s->e; z->h=s->h; z->l=s->l; unpack_f(z, s->f);
+    z->a_=s->a_; z->b_=s->b_; z->c_=s->c_; z->d_=s->d_; z->e_=s->e_; z->h_=s->h_; z->l_=s->l_; z->f_=s->f_;
+    z->ix=s->ix; z->iy=s->iy; z->sp=s->sp; z->mem_ptr=s->wz; z->i=s->i; z->r=s->r;
+    z->iff1=s->iff1; z->iff2=s->iff2; z->interrupt_mode=s->im; z->halted=s->halted;
+}
+static void from_z(Z80State *s, const z80 *z){
+    s->a=z->a; s->b=z->b; s->c=z->c; s->d=z->d; s->e=z->e; s->h=z->h; s->l=z->l; s->f=pack_f(z);
+    s->a_=z->a_; s->b_=z->b_; s->c_=z->c_; s->d_=z->d_; s->e_=z->e_; s->h_=z->h_; s->l_=z->l_; s->f_=z->f_;
+    s->ix=z->ix; s->iy=z->iy; s->sp=z->sp; s->wz=z->mem_ptr; s->i=z->i; s->r=z->r;
+    s->iff1=z->iff1; s->iff2=z->iff2; s->im=z->interrupt_mode; s->halted=z->halted;
+}
+
+/* shard CALL during validation: run the callee under superzazu on the snapshot copy,
+ * logging its OUTs to A — mirrors the live call_by_address handoff, off-thread. */
+static void sandbox_call(void *ctx, Z80State *s, uint16_t target){
+    z80 z; z80_init(&z);
+    z.read_byte=vbus_r8; z.write_byte=vbus_w8; z.port_in=sz_in; z.port_out=szA_out; z.userdata=ctx;
+    to_z(&z, s); z.pc=target; z.cyc=0;
+    uint16_t entry_sp = s->sp;
+    for (long g=0; g<16000000 && !(z.sp > entry_sp); g++) z80_step(&z);
+    from_z(s, &z);
+    s->cyc += z.cyc;
+}
+
 /* Run the shard and superzazu from the same snapshot; return 1 iff byte-identical
- * (architectural regs + flags + cyc + full memory). pc excluded (recomp model). */
+ * (regs + flags + cyc + memory + port-write log). pc excluded (recomp model). */
 static int validate(ShardFn fn, const Request *r){
     memcpy(g_memA, r->mem, sizeof g_memA);
     memcpy(g_memB, r->mem, sizeof g_memB);
-    Bus busA = { vbus_r8, vbus_w8, vbus_in, vbus_out, g_memA };
+    g_nA = g_nB = 0;
+    Bus busA = { vbus_r8, vbus_w8, vbus_in, busA_out, sandbox_call, g_memA };
 
-    Z80State sa = r->entry;
-    sa.cyc = 0;                                       /* measure the routine's cyc DELTA, not absolute */
+    Z80State sa = r->entry; sa.cyc = 0;
     fn(&sa, &busA);                                   /* shard runs to its RET */
 
     z80 z; z80_init(&z);
-    z.read_byte=vbus_r8; z.write_byte=vbus_w8; z.port_in=sz_in; z.port_out=sz_out; z.userdata=g_memB;
-    z.a=r->entry.a; z.b=r->entry.b; z.c=r->entry.c; z.d=r->entry.d;
-    z.e=r->entry.e; z.h=r->entry.h; z.l=r->entry.l;
-    z.ix=r->entry.ix; z.iy=r->entry.iy; z.sp=r->entry.sp; z.pc=r->addr; z.cyc=0;
-    unpack_f(&z, r->entry.f);
+    z.read_byte=vbus_r8; z.write_byte=vbus_w8; z.port_in=sz_in; z.port_out=szB_out; z.userdata=g_memB;
+    to_z(&z, &r->entry); z.pc=r->addr; z.cyc=0;
     uint16_t entry_sp = r->entry.sp;
-    for (long g = 0; g < 1000000; g++){               /* run until the routine RETs */
-        z80_step(&z);
-        if (z.sp > entry_sp) break;
-    }
+    for (long g=0; g<16000000 && !(z.sp > entry_sp); g++) z80_step(&z);
 
-    int ok = (sa.a==z.a)&&(sa.f==pack_f(&z))&&(sa.b==z.b)&&(sa.c==z.c)&&
-             (sa.d==z.d)&&(sa.e==z.e)&&(sa.h==z.h)&&(sa.l==z.l)&&
-             (sa.ix==z.ix)&&(sa.iy==z.iy)&&(sa.sp==z.sp)&&
-             (sa.cyc==(uint64_t)z.cyc)&&
-             (memcmp(g_memA, g_memB, sizeof g_memA) == 0);
-    return ok;
+    return (sa.a==z.a)&&(sa.f==pack_f(&z))&&(sa.b==z.b)&&(sa.c==z.c)&&
+           (sa.d==z.d)&&(sa.e==z.e)&&(sa.h==z.h)&&(sa.l==z.l)&&
+           (sa.ix==z.ix)&&(sa.iy==z.iy)&&(sa.sp==z.sp)&&
+           (sa.iff1==z.iff1)&&(sa.iff2==z.iff2)&&
+           (sa.cyc==(uint64_t)z.cyc)&&
+           (memcmp(g_memA, g_memB, sizeof g_memA)==0)&&
+           (g_nA==g_nB && memcmp(g_ioA, g_ioB, (size_t)g_nA*sizeof(IoEv))==0);
 }
 
 static void process(Request *r){
@@ -238,7 +265,7 @@ static void jit_selftest(void){
     Z80State seed; memset(&seed,0,sizeof seed);
     seed.a=0x10; seed.b=0x01; seed.c=0x02; seed.d=0x03; seed.e=0x04; seed.h=0x55; seed.l=0x66; seed.sp=0x4000;
     static uint8_t m[0x10000]; memcpy(m, r->mem, sizeof m);
-    Bus bus = { vbus_r8, vbus_w8, vbus_in, vbus_out, m };
+    Bus bus = { vbus_r8, vbus_w8, vbus_in, busA_out, sandbox_call, m };
     Z80State st = seed; fn(&st, &bus);
     fprintf(stderr,
         "[jit-selftest] PASS: shard ran natively. A=%02X B=%02X C=%02X D=%02X E=%02X L=%02X cyc=%llu\n",

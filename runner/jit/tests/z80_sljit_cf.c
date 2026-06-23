@@ -87,7 +87,7 @@ int main(int argc, char **argv){
 
         ShardFn fn = z80_sljit_compile(&g_mem[base], 0x10000-base, base);
         if (!fn){ declined++; fprintf(stderr,"[cf] decline: %s @%04X\n", z80_sljit_last_decline.why, z80_sljit_last_decline.pc); continue; }
-        Bus bus={bus_r8,bus_w8,bus_in,bus_out,g_mem};
+        Bus bus={bus_r8,bus_w8,bus_in,bus_out,NULL,g_mem};
         Z80State st=seed; st.cyc=0; fn(&st,&bus);
 
         z80 z; z80_init(&z);
