@@ -32,3 +32,6 @@ tests/last_run/
 
 # Internal working notes — never commit
 LICENSING.md
+
+# README showcase images (intentionally tracked despite *.png above)
+!screenshots/*.png

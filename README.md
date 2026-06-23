@@ -18,6 +18,12 @@ modeled by the runtime.
 > played end to end, so full-gameplay coverage is unverified. Other SMS/GG Sonic
 > titles are future targets.
 
+| Sonic the Hedgehog (SMS) | Sonic Blast (Game Gear) |
+|---|---|
+| ![Sonic 1 Green Hill Zone](screenshots/sonic1-green-hill-zone.png) | ![Sonic Blast gameplay](screenshots/sonicblast-gameplay.png) |
+
+*Recompiled native builds (no emulator), captured running the original ROMs.*
+
 ## Per-game runner repos
 
 smsggrecomp is the shared framework. Each game lives in its own companion repo
