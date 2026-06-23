@@ -156,8 +156,8 @@ static const char *g_miss_path = "dispatch_misses.log";
 /* ---- always-on function-entry ring ---- */
 uint16_t g_enter_ring[SMS_ENTER_RING_SIZE];
 uint32_t g_enter_pos;
+uint16_t g_dbg_pc;             /* address of the instruction now executing; pushed by take_irq */
 #ifdef SMS_TRACE_PC
-uint16_t g_dbg_pc;
 uint16_t g_dbg_irq_from;   /* main-loop PC interrupted by the last IRQ */
 #endif
 
@@ -434,11 +434,29 @@ static void take_irq(void){
                                           * over hundreds of frames. */
     g_z80.iff1 = g_z80.iff2 = false;     /* Z80 disables interrupts on accept */
     g_z80.halted = false;
-    /* push a return address so the handler's RET stays SP-balanced. The real
-     * interrupted PC is not tracked in the recompiled model; the C call stack
-     * carries the actual return path. */
+    /* Push the REAL interrupted PC (g_dbg_pc = address of the instruction this IRQ
+     * preempted), exactly as hardware does. Control still unwinds via the C call
+     * stack (the handler's RET pops these two bytes and returns here), but the
+     * pushed VALUE is now correct for handlers that READ the stacked return
+     * address - which Sonic Blast's title path does. A 0x0000 placeholder sent it
+     * down the wrong branch and the title never uploaded. */
     g_z80.sp = (uint16_t)(g_z80.sp - 2);
-    sms_write16(g_z80.sp, 0x0000);
+    sms_write16(g_z80.sp, g_dbg_pc);
+    {   /* env-gated IRQ-event trace: SMS_IRQ_TRACE=1 [SMS_IRQ_LO/HI=frame] */
+        static int armed=-1; static long lo,hi;
+        if (armed<0){ const char *e=getenv("SMS_IRQ_TRACE"); armed=e?1:0;
+            const char *l=getenv("SMS_IRQ_LO"), *h=getenv("SMS_IRQ_HI");
+            lo=l?strtol(l,0,10):-1; hi=h?strtol(h,0,10):(1L<<30); }
+        if (armed && (long)g_frame>=lo && (long)g_frame<=hi){
+            int fi=g_vdp.frame_irq, li=g_vdp.line_irq;
+            uint16_t from=g_dbg_pc, sp0=g_z80.sp;
+            call_by_address(0x0038);
+            fprintf(stderr,"[irq] f=%llu from=%04X src=%s iff1_after=%d sp:%04X->%04X line=%d\n",
+                (unsigned long long)g_frame, from, fi?"VBL":(li?"LINE":"?"),
+                g_z80.iff1, sp0, g_z80.sp, g_vdp.line);
+            return;
+        }
+    }
     call_by_address(0x0038);             /* IM1 vector; RET unwinds back here */
 }
 
@@ -564,6 +582,25 @@ static void state_from_hz(void){
     g_z80.ei_block = g_hz.iff_delay ? 1 : 0;
 }
 
+/* Classify the instruction at `pc` for hybrid call/ret-depth tracking:
+ * +1 = pushes a return (CALL / CALL cc / RST), -1 = pops a return (RET / RET cc /
+ * RETI / RETN), 0 = neither. PUSH/POP move SP but are NOT control transfers, so
+ * they classify as 0 - which is the whole point: a routine entered via a tail
+ * JP(HL) (e.g. an IRQ-handler continuation like Sonic Blast's line-raster $1AAF)
+ * pops the caller's saved registers before its own RET. A raw `sp > entry_sp`
+ * stop test trips on that first POP and bails mid-routine (leaving iff1=0);
+ * depth-tracking exits only on the routine's actual returning RET. */
+static int hyb_cf_class(uint16_t pc){
+    uint8_t b = sms_read8(pc);
+    if (b == 0xED) return ((sms_read8((uint16_t)(pc+1)) & 0xC7) == 0x45) ? -1 : 0; /* RETI/RETN */
+    if (b == 0xC9)          return -1;   /* RET        */
+    if ((b & 0xC7) == 0xC0) return -1;   /* RET cc     */
+    if (b == 0xCD)          return +1;   /* CALL nn    */
+    if ((b & 0xC7) == 0xC4) return +1;   /* CALL cc,nn */
+    if ((b & 0xC7) == 0xC7) return +1;   /* RST        */
+    return 0;
+}
+
 static void hybrid_interpret(uint16_t addr){
     if (!g_hz_init){
         z80_init(&g_hz);
@@ -582,16 +619,42 @@ static void hybrid_interpret(uint16_t addr){
      * tripping it means a real stall, not normal work. */
     const long guard_max = 16L*1000L*1000L;
     long guard = 0;
+    /* Stop when the routine RETs out of its entry frame. We track explicit
+     * CALL/RST/interrupt depth and only test at a taken RET:
+     *   depth>0                         -> internal return, depth--
+     *   depth==0 && sp>entry_sp         -> returned to the entry caller: STOP
+     *   depth==0 && sp<=entry_sp        -> the `push <cont>; jp(hl)` computed-call
+     *                                      idiom returning to its continuation
+     *                                      (the push isn't a CALL opcode, so depth
+     *                                      stayed 0) -> keep going
+     * Testing only at a RET (not on every sp>entry_sp) is what lets a tail-jumped
+     * IRQ-handler continuation (Sonic Blast's line-raster $1AAF) POP the caller's
+     * saved registers - lifting sp above entry_sp - without a premature stop; its
+     * own final RET is the real exit. The old sp-only test bailed at that POP and
+     * left iff1=0, freezing the title sequence. */
+    int depth = 0;
     for (;;){
-        if (!g_diff_freeze && vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
+        bool took_int = false;
+        if (!g_diff_freeze && vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending){
             z80_gen_int(&g_hz, 0xFF);    /* IM1: vector 0x0038 (data ignored) */
+            took_int = true;             /* the next step accepts it, pushing a return */
+        }
+        int cls = took_int ? 0 : hyb_cf_class(g_hz.pc);
+        uint16_t sp0 = g_hz.sp;
         z80_step(&g_hz); g_frame_ic++;
         advance_vdp(base + g_hz.cyc);
         g_sync_deadline = g_next_line_cyc;
-        if (!g_hz.halted && g_hz.sp > entry_sp) break;   /* routine RETed */
+        int dsp = (int16_t)(g_hz.sp - sp0);
+        if (took_int){ if (dsp == -2) depth++; }          /* interrupt pushed PC      */
+        else if (cls > 0 && dsp == -2) depth++;           /* taken CALL/RST           */
+        else if (cls < 0 && dsp ==  2){                   /* taken RET/RETI/RETN      */
+            if (depth > 0) depth--;
+            else if (g_hz.sp > entry_sp) break;           /* returned to entry caller */
+            /* else: push;jp(hl) continuation return -> keep interpreting */
+        }
         if (++guard >= guard_max){
             fprintf(stderr, "[hybrid] guard tripped: addr=%04X pc=%04X sp=%04X "
-                    "(entry_sp=%04X)\n", addr, g_hz.pc, g_hz.sp, entry_sp);
+                    "(entry_sp=%04X depth=%d)\n", addr, g_hz.pc, g_hz.sp, entry_sp, depth);
             break;
         }
     }

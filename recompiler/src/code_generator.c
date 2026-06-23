@@ -503,7 +503,8 @@ static void emit_block(FILE *o, uint8_t op){
      * diverges from the oracle. */
     fprintf(o,"        do {\n");
     emit_block_body(o, op, "            ");
-    fprintf(o,"            sms_tick((%s) ? 21 : 16);\n", contc);
+    /* post-body tick: this iteration's effect already ran (see sms_tick_post) */
+    fprintf(o,"            sms_tick_post((%s) ? 21 : 16);\n", contc);
     fprintf(o,"        } while (%s);\n", contc);
 }
 

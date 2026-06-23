@@ -108,12 +108,33 @@ int  sms_slot_bank(uint16_t addr);
 
 extern int g_diff_freeze; extern uint64_t g_diff_icount; void sms_diff_abort(void);
 extern uint64_t g_frame_ic;   /* per-frame instruction count (timing-drift probe) */
+/* Pre-body tick: emitted BEFORE every non-block instruction's body. Sync-first -
+ * settle the PREVIOUS instruction's end-of-cycle IRQ sample (VDP advanced through
+ * that instruction's completion), THEN charge this instruction's cost. This makes
+ * the recompiled path accept interrupts at the exact instruction boundary the
+ * superzazu interpreter/oracle does - and that real Z80 hardware does: /INT is
+ * sampled on an instruction's final T-state and accepted before the next one.
+ * Charging before the sync ("pre-pay") advanced the VDP one instruction too far at
+ * the sample point, so IRQs landed one instruction early and the timeline drifted
+ * ~1 insn/frame from the oracle. The tick CALL still precedes the body (the goto/
+ * return lives there); only the sync-vs-charge order inside the tick moved. */
 static inline void sms_tick(uint8_t n){
+    g_frame_ic++;
+    if (g_z80.cyc >= g_sync_deadline) sms_sync();
+    g_z80.cyc += n;
+    g_z80.ei_block = 0;   /* the EI-delay covers exactly one instruction boundary */
+    if (g_diff_freeze && ++g_diff_icount > 3000000u) sms_diff_abort();  /* bound diff test runs */
+}
+/* Post-body tick: emitted AFTER a repeating block-op iteration's effect (LDIR/OTIR/
+ * ... - the one site where a tick follows its body). Charge-first: the iteration's
+ * memory/register effect already happened, so charge its cost and sample the IRQ
+ * now, matching superzazu which advances the VDP after each block-op iteration. */
+static inline void sms_tick_post(uint8_t n){
     g_frame_ic++;
     g_z80.cyc += n;
     if (g_z80.cyc >= g_sync_deadline) sms_sync();
-    g_z80.ei_block = 0;   /* the EI-delay covers exactly one instruction boundary */
-    if (g_diff_freeze && ++g_diff_icount > 3000000u) sms_diff_abort();  /* bound diff test runs */
+    g_z80.ei_block = 0;
+    if (g_diff_freeze && ++g_diff_icount > 3000000u) sms_diff_abort();
 }
 
 /* ---- always-on function-entry ring (PRINCIPLES #17) ---------------------- *
@@ -134,15 +155,19 @@ static inline void sms_enter(uint16_t addr){
     if (g_diff_active) sms_diff_enter(addr);
 }
 
-/* Optional per-instruction PC breadcrumb (debug builds only). Generated code
- * calls SMS_PC(addr) before each instruction; -DSMS_TRACE_PC records the last
- * executed address so a stall can be localised. Compiled out by default. */
-#ifdef SMS_TRACE_PC
+/* Per-instruction PC breadcrumb. Generated code calls SMS_PC(addr) before each
+ * instruction; g_dbg_pc holds the address of the instruction currently executing.
+ * It is maintained in ALL builds (release too) because the IM1 interrupt accept
+ * must push the REAL interrupted PC - games read (and may act on) the stacked
+ * return address, so a 0x0000 placeholder diverges them. The store is a single
+ * constant-to-global per instruction (not telemetry). -DSMS_TRACE_PC layers the
+ * heavier per-instruction differential trace on top. */
 extern uint16_t g_dbg_pc;
+#ifdef SMS_TRACE_PC
 extern int g_diff_trace; void sms_diff_logpc(void);   /* differential instruction-level trace */
 #define SMS_PC(a) (g_dbg_pc = (uint16_t)(a), (g_diff_trace ? sms_diff_logpc() : (void)0))
 #else
-#define SMS_PC(a) ((void)0)
+#define SMS_PC(a) (g_dbg_pc = (uint16_t)(a))
 #endif
 
 #endif /* SMS_RUNTIME_H */
