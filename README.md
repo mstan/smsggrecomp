@@ -6,10 +6,29 @@ emulates the rest of the machine (VDP, SN76489 PSG, controller/system I/O,
 mapper). One engine, both platforms — the Game Gear is the Master System with
 a cropped viewport, a wider palette, and stereo sound (see PRINCIPLES.md #25).
 
-> **Status: bring-up / scaffold.** The recompiler tool and runner compile and
-> are architecturally complete; no game has been generated yet (needs a ROM).
-> First targets: the **Sonic the Hedgehog SMS ports** (Sonic 1 / Sonic 2 /
-> Sonic Chaos / Sonic Blast on SMS) and **Sonic Blast / Sonic 2 on Game Gear**.
+This is **not** an emulator and **not** a hand-port: the game's Z80 machine
+code becomes native C that runs directly; only the surrounding silicon is
+modeled by the runtime.
+
+> **Status: early (v0.0.1) — mostly untested, expect bugs.** Two games are in
+> bring-up: **Sonic the Hedgehog (SMS)** boots and plays Green Hill Zone, and
+> **Sonic Blast (Game Gear)** boots through the intro to its title screen. On
+> the verified paths both render byte-exact to the vendored superzazu
+> interpreter used as an oracle. Other SMS/GG Sonic titles are future targets.
+
+## Per-game runner repos
+
+smsggrecomp is the shared framework. Each game lives in its own companion repo
+that supplies the per-game `game.toml`, build glue, and a pre-built release. The
+ROM and the generated C are **never** committed — you bring your own legally
+dumped ROM and regenerate locally.
+
+- **Sonic the Hedgehog (SMS)** —
+  [mstan/SonicTheHedgehogSMSRecomp](https://github.com/mstan/SonicTheHedgehogSMSRecomp).
+  Boots and plays Green Hill Zone; renders byte-exact to the oracle. Early.
+- **Sonic Blast (Game Gear)** —
+  [mstan/SonicBlastGGRecomp](https://github.com/mstan/SonicBlastGGRecomp).
+  Boots through the intro to the title screen, byte-exact to the oracle. Early.
 
 ## How it works
 
@@ -20,7 +39,8 @@ set, I/R, flags) and the same 64 KB address space + paged ROM as the original.
 **The rest of the machine is not recompiled** — VDP rendering, the SN76489
 PSG, controller/system ports, and the Sega/Codemasters mapper all run in the
 runner. Same model as the sibling projects: recompile the CPU, emulate the
-silicon.
+silicon. Computed jumps the static analysis can't resolve fall back to the
+vendored superzazu Z80 interpreter over the live bus (the "hybrid" path).
 
 Key pieces:
 - **`z80_decoder.c`** — full Z80 ISA decode incl. the `CB`/`ED`/`DD`/`FD`/
@@ -41,14 +61,14 @@ Key pieces:
 | `runner/` | Shared clean-room runtime: Z80 interpreter (hybrid fallback), VDP, SN76489 PSG, I/O, mapper, SDL2 host, glue. |
 | `runner/include/sms_runtime.h` | Shared interface: `Z80State`, bus/IO access, runtime globals. |
 | `runner/external/superzazu/` | Vendored MIT Z80 core — interpreter + codegen reference. |
-| `sonic1sms/` | First per-game target: `game.toml` + `generated/` (READ-ONLY) + spec. |
 | `tools/` | Platform-agnostic probes and the release packager. |
 | `docs/` | Design notes. |
+| _(per-game repos)_ | Each game has its own companion repo — see **Per-game runner repos** above. |
 
 ## Platform support
 
-Targets **Windows (MSVC)**, **macOS**, and **Linux**. SDL2 handles windowing,
-rendering, audio, and gamepads.
+Targets **Windows (MSVC / MinGW)**, **macOS**, and **Linux**. SDL2 handles
+windowing, rendering, audio, and gamepads.
 
 ## Building the recompiler
 
@@ -61,21 +81,31 @@ cmake --build build --config Release
 
 ## Regenerating a game
 
+From a game's companion repo checked out as a sibling of this engine:
+
 ```bash
-cd sonic1sms
-../recompiler/build/Release/SmsRecomp.exe sonic1.sms --game game.toml
-# overwrites generated/<prefix>_full.c + <prefix>_dispatch.c, then rebuild the runner.
+# regenerate the native C from your own ROM:
+../smsggrecomp/recompiler/build/SmsRecomp.exe sonicthehedgehog.sms --game game.toml
+# overwrites generated/<prefix>_{full,dispatch,layout}.c, then rebuild the runner.
 ```
 
 ## ROMs
 
-ROMs are **never** committed (`.gitignore`d). Drop a legally-obtained ROM into
-the game directory and point `game.toml` at it. SMS ROMs are `.sms`, Game Gear
-`.gg`; both are raw Z80 images with the `TMR SEGA` footer near the end of the
-first 32 KB.
+ROMs are **never** committed (`.gitignore`d), and neither is the generated C
+(it is a derivative of the ROM). Drop a legally-obtained ROM into the game
+directory and point `game.toml` at it. SMS ROMs are `.sms`, Game Gear `.gg`;
+both are raw Z80 images with the `TMR SEGA` footer near the end of the first
+32 KB.
+
+## Acknowledgements
+
+- **superzazu** — the vendored MIT Z80 interpreter (`runner/external/superzazu/`)
+  serves as both the semantic reference for the recompiler and the oracle the
+  generated code is validated against.
 
 ## License
 
-Project code: PolyForm Noncommercial 1.0.0 (see `LICENSE.md` once added).
-Vendored `superzazu/z80.c` is MIT (`runner/external/superzazu/LICENSE`). The
-clean-room SN76489 carries no third-party copyleft.
+Not yet declared. Code in this repo is original except where noted in
+**Acknowledgements** above: the vendored `runner/external/superzazu/z80.c` is
+MIT (see its own `LICENSE`). The clean-room SN76489 PSG is original to this
+project.
