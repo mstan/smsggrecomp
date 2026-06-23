@@ -25,6 +25,7 @@ typedef enum {
     FUNC_SRC_JUMP    = 1 << 2,  /* JP/JR target outside the current function */
     FUNC_SRC_CONFIG  = 1 << 3,  /* game.toml [functions].extra */
     FUNC_SRC_TABLE   = 1 << 4,  /* jump-table entry */
+    FUNC_SRC_MANIFEST= 1 << 5,  /* runtime dispatch-manifest seed (ROM-CRC verified) */
 } FuncSource;
 
 typedef struct {

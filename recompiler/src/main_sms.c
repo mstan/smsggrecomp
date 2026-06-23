@@ -24,6 +24,52 @@ static void dirname_of(const char *path, char *dir, size_t cap){
     memcpy(dir, path, cut); dir[cut]='\0';
 }
 
+/* Re-derive the runtime's 256-byte FNV-1a32 code-CRC at a z80 address, reading
+ * through the manifest's per-slot banks (matching glue.c mb_code_crc on the live
+ * bus). Returns 0 in *ok if the window spills into RAM (>=0xC000) - those bytes
+ * weren't in ROM so the entry can't be CRC-verified statically. */
+static uint32_t manifest_rom_crc(const SmsRom *rom, uint16_t addr,
+                                 int b0, int b1, int b2, int *ok){
+    const int banks[3] = { b0, b1, b2 };
+    uint32_t h = 2166136261u;
+    *ok = 1;
+    for (int i=0;i<256;i++){
+        uint32_t ai = (uint32_t)addr + (uint32_t)i;     /* no 16-bit wrap: addr<0xC000 */
+        if (ai >= 0xC000){ *ok = 0; return 0; }          /* RAM byte: unverifiable */
+        size_t off = rom_z80_to_offset(rom, (uint16_t)ai, banks[ai >> 14]);
+        uint8_t v = (off==SIZE_MAX) ? 0xFF : rom_read_offset(rom, off);
+        h ^= v; h *= 16777619u;
+    }
+    return h;
+}
+
+/* Ingest the runtime dispatch manifest (PRINCIPLES #16: runtime says an
+ * (addr,bank) IS an executed entry; the ROM cross-check confirms WHICH bytes).
+ * Each verified line seeds a banked entry so ff_discover traces + cascades it. */
+static int manifest_seed(const SmsRom *rom, FuncList *fl, const char *path){
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int seeded=0, rejected=0, total=0;
+    unsigned a,b0,b1,b2,crc;
+    while (fscanf(f, "%x %x %x %x %x", &a,&b0,&b1,&b2,&crc) == 5){
+        total++;
+        if (a >= 0xC000) continue;                       /* RAM target: not ROM code */
+        int slot = a >> 14;
+        int bank = (slot==0) ? (int)b0 : (slot==1) ? (int)b1 : (int)b2;
+        int ok;
+        uint32_t rc = manifest_rom_crc(rom, (uint16_t)a, (int)b0,(int)b1,(int)b2, &ok);
+        if (ok && rc != crc){ rejected++; continue; }    /* stale/garbage vs current ROM */
+        if (funclist_find(fl,(uint16_t)a,bank) < 0){
+            funclist_add(fl,(uint16_t)a,bank,NULL,FUNC_SRC_MANIFEST,true);
+            seeded++;
+        }
+    }
+    fclose(f);
+    printf("[SmsRecomp] dispatch manifest: %d entries, %d seeded, %d rejected (ROM-CRC)\n",
+           total, seeded, rejected);
+    return seeded;
+}
+
 int main(int argc, char **argv){
     const char *rom_arg = NULL;
     const char *game_toml = NULL;
@@ -87,6 +133,13 @@ int main(int argc, char **argv){
         }
     }
     if (jt_added) printf("[SmsRecomp] jump tables seeded %d entries\n", jt_added);
+
+    /* Profile-guided seeds from the runtime dispatch manifest (next to game.toml). */
+    {
+        char dir[260]; dirname_of(game_toml, dir, sizeof(dir));
+        char mpath[320]; snprintf(mpath,sizeof mpath,"%sdispatch_manifest.txt", dir);
+        manifest_seed(&rom, &fl, mpath);
+    }
 
     ff_discover(&rom, &fl, cfg.blacklist, cfg.blacklist_count);
 
