@@ -10,11 +10,13 @@ This is **not** an emulator and **not** a hand-port: the game's Z80 machine
 code becomes native C that runs directly; only the surrounding silicon is
 modeled by the runtime.
 
-> **Status: early (v0.0.1) — mostly untested, expect bugs.** Two games are in
-> bring-up: **Sonic the Hedgehog (SMS)** boots and plays Green Hill Zone, and
-> **Sonic Blast (Game Gear)** boots through the intro to its title screen. On
-> the verified paths both render byte-exact to the vendored superzazu
-> interpreter used as an oracle. Other SMS/GG Sonic titles are future targets.
+> **Status: early (v0.0.2) — pre-release, expect bugs.** Two games are in
+> bring-up: **Sonic the Hedgehog (SMS)** and **Sonic Blast (Game Gear)**. Across
+> the title + attract-demo path exercised so far (~60s), both run with no
+> interpreter-fallback dispatch miss and render byte-exact (palette + system RAM)
+> to the vendored superzazu interpreter used as an oracle. Neither game has been
+> played end to end, so full-gameplay coverage is unverified. Other SMS/GG Sonic
+> titles are future targets.
 
 ## Per-game runner repos
 
