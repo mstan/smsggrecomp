@@ -403,19 +403,50 @@ typedef struct {
  * index of the `ld r,(hl)` (where HL == table pointer), or -1 if not the idiom. */
 static int jt_terminal_load(const TraceResult *t, int k){
     if (k < 4) return -1;
-    const TracedInsn *jp=&t->insns[k], *l1=&t->insns[k-1], *l2=&t->insns[k-2];
-    const TracedInsn *l3=&t->insns[k-3], *l4=&t->insns[k-4];
-    if (l1->insn.prefix||l2->insn.prefix||l3->insn.prefix||l4->insn.prefix) return -1;
+    /* Walk back from the insn before jp(hl), skipping HL-neutral fillers (a
+     * handler commonly preloads a parameter, e.g. `ld a,(de)`, between the
+     * pointer load and the jp), to find the `ld l,r` that ends the load. The
+     * skip stops at the first HL-writer (the candidate ld l,r) and requires
+     * byte-contiguity throughout, so it can never wander across a branch. */
+    int i = k-1;
+    uint16_t expect_next = t->insns[k].addr;
+    while (i >= 0){
+        const TracedInsn *c=&t->insns[i];
+        if (c->insn.prefix) return -1;
+        if ((uint16_t)(c->addr+c->insn.length)!=expect_next) return -1;  /* not contiguous */
+        if (insn_writes_rp(&c->insn,2)) break;     /* first HL-writer = candidate ld l,r */
+        expect_next = c->addr;
+        i--;
+    }
+    if (i < 3) return -1;
+    const TracedInsn *l1=&t->insns[i], *l2=&t->insns[i-1];
+    const TracedInsn *l3=&t->insns[i-2], *l4=&t->insns[i-3];
+    if (l2->insn.prefix||l3->insn.prefix||l4->insn.prefix) return -1;
     if ((uint16_t)(l4->addr+l4->insn.length)!=l3->addr) return -1;
     if ((uint16_t)(l3->addr+l3->insn.length)!=l2->addr) return -1;
     if ((uint16_t)(l2->addr+l2->insn.length)!=l1->addr) return -1;
-    if ((uint16_t)(l1->addr+l1->insn.length)!=jp->addr) return -1;
     if (l3->insn.opcode!=0x23) return -1;       /* inc hl   */
     if (l2->insn.opcode!=0x66) return -1;       /* ld h,(hl)*/
     uint8_t lo=l1->insn.opcode, hi=l4->insn.opcode;  /* ld l,r  / matching ld r,(hl) */
     bool pair=(lo==0x6F&&hi==0x7E)||(lo==0x69&&hi==0x4E)||(lo==0x68&&hi==0x46)||
               (lo==0x6A&&hi==0x56)||(lo==0x6B&&hi==0x5E);
-    return pair ? k-4 : -1;
+    return pair ? i-3 : -1;
+}
+
+/* Unconditional control-flow terminator: the dispatch block cannot have begun
+ * before the prior routine ended here, so the contiguous back-walk must stop
+ * (code before it belongs to a different path and commonly clobbers the index). */
+static bool insn_is_uncond_terminator(const Z80Insn *in){
+    switch (in->prefix){
+    case Z80_PFX_NONE:
+        return in->opcode==0xC9 /*ret*/ || in->opcode==0xC3 /*jp nn*/ ||
+               in->opcode==0x18 /*jr d*/ || in->opcode==0xE9 /*jp (hl)*/;
+    case Z80_PFX_ED:
+        return in->opcode==0x45 /*retn*/ || in->opcode==0x4D /*reti*/;
+    case Z80_PFX_DD: case Z80_PFX_FD:
+        return in->opcode==0xE9 /*jp (ix/iy)*/;
+    default: return false;
+    }
 }
 
 /* Symbolically simulate the dispatch basic block to recover base+index*stride
@@ -434,13 +465,20 @@ static JtDetect detect_jump_table(const TraceResult *t, int k){
     while (bstart > 0 && window < 64){
         const TracedInsn *p=&t->insns[bstart-1], *c=&t->insns[bstart];
         if ((uint16_t)(p->addr+p->insn.length)!=c->addr) break;   /* not contiguous */
+        if (insn_is_uncond_terminator(&p->insn)) break;           /* prior routine ended here */
         bstart--; window++;
     }
     /* HL = base + (has_index ? index*scale : 0) */
     struct { bool known, has_index; int scale; uint16_t base; } hl = {0,0,0,0};
     bool de_c=false, bc_c=false; uint16_t de_v=0, bc_v=0;
     bool c_idx=false, b_zero=false, e_idx=false, d_zero=false, h_zero=false;
-    bool a_idx=false; int ilo=0, ihi=255; bool ibounded=false;
+    /* A starts as a candidate index: dispatchers commonly receive the table
+     * index in A from the caller (e.g. `sub bias ; ld hl,base ; add a,a ; ld c,a
+     * ; ld b,0 ; add hl,bc`) with no in-block `ld a,(...)`. The handlers below
+     * downgrade A to non-index the moment it is loaded with a constant (`ld a,n`)
+     * or clobbered, so this stays precise; the strict pointer-load terminal and
+     * the table self-bound gate out false matches. */
+    bool a_idx=true; int ilo=0, ihi=255; bool ibounded=false;
     bool ap_idx=false; int ap_lo=0, ap_hi=255; bool ap_bounded=false;  /* shadow AF' */
     bool has_cp=false; int cpv=0;
     for (int j=bstart;j<loadidx;j++){
@@ -465,7 +503,9 @@ static JtDetect detect_jump_table(const TraceResult *t, int k){
         case 0xE6: if (a_idx){ ilo=0; ihi=(uint8_t)in->imm; ibounded=true; } break;   /* and n */
         case 0x3D: if (a_idx){ ilo--; ihi--; if (ilo<0) ilo=0; } break;               /* dec a */
         case 0x3C: if (a_idx){ ilo++; ihi++; } break;                                 /* inc a */
-        case 0x87: a_idx=false; break;                            /* add a,a : scaling unmodeled -> bail safe */
+        case 0x87:                                                /* add a,a : index *= 2 (A holds 2*index) */
+            if (a_idx){ ilo*=2; ihi*=2; if (ihi>255) ihi=255; if (ilo>255) ilo=255; }
+            has_cp=false; break;
         case 0x4F: c_idx=a_idx; break;                            /* ld c,a */
         case 0x06: b_zero=((uint8_t)in->imm==0); break;           /* ld b,n */
         case 0x5F: e_idx=a_idx; break;                            /* ld e,a */
@@ -530,6 +570,11 @@ static int ff_seed_jt(const SmsRom *rom, FuncList *fl, const TraceResult *t, int
         size_t off=rom_z80_to_offset(rom, ea, tbank);
         if (off==SIZE_MAX || off+1>=rom->size) break;
         uint16_t T=(uint16_t)(rom_read_offset(rom,off) | (rom_read_offset(rom,off+1)<<8));
+        /* A dispatch handler can never live in RAM ($C000+); the first RAM-valued
+         * entry is the table terminator (bytes past the real table read as
+         * pointers). navail stops here and the count>navail clamp below tightens
+         * both dense and proven tables to the genuine length. */
+        if (T >= 0xC000) break;
         ptr[e]=T; navail=e+1;
         if ((T>>14)==tslot && T>d.base && T<min_fwd){ min_fwd=T; have_fwd=true; }
     }
@@ -604,14 +649,17 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
             for (int k=0;k<tr.insn_count;k++){
                 bankstate_step(&bs, &tr.insns[k], k>0 ? &tr.insns[k-1] : NULL);
                 const Z80Insn *in=&tr.insns[k].insn;
-                /* computed jp (hl): a jump-table dispatch (not the push;jp(hl)
-                 * computed-CALL idiom) -> auto-detect the table + seed targets. */
+                /* computed jp (hl): auto-detect a pointer table and seed targets.
+                 * Run this even when the site is ALSO a push-ret computed CALL
+                 * (handlers ret to a pushed continuation, e.g. `ld hl,cont ; push
+                 * hl ; ld hl,base ; add a,a ; add hl,bc ; ... ; jp (hl)`): the
+                 * continuation and the table enumeration are orthogonal, and the
+                 * computed-CALL emission is handled independently in code_generator.
+                 * ff_seed_jt self-gates to the real table idiom, so a pure computed
+                 * call with no table seeds nothing. */
                 if (is_computed_jp(in)){
-                    uint16_t cont;
-                    if (!trace_computed_call(&tr, tr.insns[k].addr, &cont)){
-                        int s = ff_seed_jt(rom, fl, &tr, k, &bs, blacklist, blacklist_count);
-                        if (s>0){ jt_seeded += s; changed=true; }
-                    }
+                    int s = ff_seed_jt(rom, fl, &tr, k, &bs, blacklist, blacklist_count);
+                    if (s>0){ jt_seeded += s; changed=true; }
                 }
                 bool is_call = (in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND);
                 bool is_tailjump = (in->cf==Z80_CF_JUMP && in->has_target &&
