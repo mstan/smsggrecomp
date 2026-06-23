@@ -19,6 +19,24 @@
 /* flag-exact helpers (z80_sljit_helpers.c), backed by z80_ops.h */
 extern long z80h_inc8(Z80State *s, long v);
 extern long z80h_dec8(Z80State *s, long v);
+extern void z80h_add(Z80State *s, long v), z80h_adc(Z80State *s, long v);
+extern void z80h_sub(Z80State *s, long v), z80h_sbc(Z80State *s, long v);
+extern void z80h_and(Z80State *s, long v), z80h_xor(Z80State *s, long v);
+extern void z80h_or (Z80State *s, long v), z80h_cp (Z80State *s, long v);
+extern void z80h_rlca(Z80State *s), z80h_rrca(Z80State *s);
+extern void z80h_rla (Z80State *s), z80h_rra (Z80State *s);
+
+/* indexed by the Z80 ALU group (y field): ADD ADC SUB SBC AND XOR OR CP */
+static void *const ALU_HELP[8] = {
+    (void*)z80h_add,(void*)z80h_adc,(void*)z80h_sub,(void*)z80h_sbc,
+    (void*)z80h_and,(void*)z80h_xor,(void*)z80h_or ,(void*)z80h_cp
+};
+
+/* call void helper(Z80State*, long): caller must pre-load the operand into R1. */
+static void emit_alu_call(struct sljit_compiler *c, void *fn){
+    sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+    sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM, (sljit_sw)fn);
+}
 
 #define OFF(field) ((sljit_sw)offsetof(Z80State, field))
 
@@ -83,6 +101,31 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
         sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS2(W, P, W),
                          SLJIT_IMM, (sljit_sw)(isdec ? (void*)z80h_dec8 : (void*)z80h_inc8));
         sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0), o, SLJIT_R0, 0);  /* store result */
+        emit_tick(c, 4);
+        return 1;
+    }
+
+    if (op >= 0x80 && op <= 0xBF){                     /* ALU A,r (ADD..CP) */
+        sljit_sw o = reg8_off(op & 7);
+        if (o < 0) return 0;                           /* ALU A,(HL): memory */
+        sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), o);
+        emit_alu_call(c, ALU_HELP[(op >> 3) & 7]);
+        emit_tick(c, 4);
+        return 1;
+    }
+
+    if ((op & 0xC7) == 0xC6){                          /* ALU A,n */
+        sljit_emit_op1(c, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, (sljit_sw)(in->imm & 0xFF));
+        emit_alu_call(c, ALU_HELP[(op >> 3) & 7]);
+        emit_tick(c, 7);
+        return 1;
+    }
+
+    if (op == 0x07 || op == 0x0F || op == 0x17 || op == 0x1F){   /* RLCA/RRCA/RLA/RRA */
+        void *fn = (op==0x07) ? (void*)z80h_rlca : (op==0x0F) ? (void*)z80h_rrca
+                 : (op==0x17) ? (void*)z80h_rla  : (void*)z80h_rra;
+        sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);
+        sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, (sljit_sw)fn);
         emit_tick(c, 4);
         return 1;
     }

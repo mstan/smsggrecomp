@@ -55,8 +55,9 @@ int main(int argc, char **argv){
         int count = rand() % 9;          /* 0..8 ops, then RET */
         size_t len = 0;
         for (int k = 0; k < count; k++){
-            int kind = rand() % 5;
-            int dr = SUP_REG[rand() % 7], sr = SUP_REG[rand() % 7];
+            static const uint8_t ROT[4] = {0x07,0x0F,0x17,0x1F};
+            int kind = rand() % 8;
+            int dr = SUP_REG[rand() % 7], sr = SUP_REG[rand() % 7], g = rand() % 8;
             switch (kind){
                 case 0: g_mem[base+len++] = 0x00; break;                         /* NOP */
                 case 1: g_mem[base+len++] = (uint8_t)(0x40 | (dr<<3) | sr); break;/* LD r,r' */
@@ -64,6 +65,10 @@ int main(int argc, char **argv){
                         g_mem[base+len++] = (uint8_t)(rand() & 0xFF); break;      /* LD r,n */
                 case 3: g_mem[base+len++] = (uint8_t)(0x04 | (dr<<3)); break;     /* INC r */
                 case 4: g_mem[base+len++] = (uint8_t)(0x05 | (dr<<3)); break;     /* DEC r */
+                case 5: g_mem[base+len++] = (uint8_t)(0x80 | (g<<3) | sr); break; /* ALU A,r */
+                case 6: g_mem[base+len++] = (uint8_t)(0xC6 | (g<<3));
+                        g_mem[base+len++] = (uint8_t)(rand() & 0xFF); break;      /* ALU A,n */
+                case 7: g_mem[base+len++] = ROT[rand() % 4]; break;              /* RLCA/RRCA/RLA/RRA */
             }
         }
         g_mem[base+len++] = 0xC9;        /* RET */
