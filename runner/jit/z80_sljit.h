@@ -15,6 +15,17 @@
 #include <stdint.h>
 #include "jit_abi.h"
 
+/* Why the last z80_sljit_compile() that returned NULL declined: the first
+ * instruction it could not emit. For observability (which ops to add next). */
+typedef struct {
+    uint16_t    pc;          /* guest address of the blocking instruction */
+    uint8_t     prefix;      /* Z80Prefix */
+    uint8_t     opcode;
+    char        text[40];    /* disassembly */
+    const char *why;         /* human-readable category */
+} ZjitDecline;
+extern ZjitDecline z80_sljit_last_decline;
+
 ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base);
 
 #endif /* SMS_Z80_SLJIT_H */

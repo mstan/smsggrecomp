@@ -22,6 +22,9 @@
 
 #ifdef SMS_HAVE_JIT
 
+uint64_t sms_jit_published(void);        /* live coverage counters (any thread) */
+uint64_t sms_jit_requested(void);
+uint64_t sms_jit_declined(void);
 void    sms_jit_init(void);              /* start the worker thread */
 void    sms_jit_shutdown(void);          /* signal + join the worker thread */
 ShardFn sms_jit_lookup(uint16_t addr);   /* lock-free; NULL until a trusted shard exists */

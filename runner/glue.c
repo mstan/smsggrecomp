@@ -268,6 +268,22 @@ static void frame_completed(void){
     g_frame++;
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
+#ifdef SMS_HAVE_JIT
+    /* live Tier-2 coverage: shards published (monotonic up = coverage growing) and
+     * the interp fraction over the last window (drops as shards take over). */
+    { static uint64_t lf, lh, lt;
+      if (g_frame - lf >= 120){
+          uint64_t dh = g_hybrid_cyc - lh, dt = g_z80.cyc - lt;
+          fprintf(stderr, "[jit-cov] frame=%llu shards=%llu req=%llu declined=%llu | "
+                  "interp last~2s=%.1f%% total=%.1f%%\n",
+                  (unsigned long long)g_frame, (unsigned long long)sms_jit_published(),
+                  (unsigned long long)sms_jit_requested(), (unsigned long long)sms_jit_declined(),
+                  dt ? 100.0*(double)dh/(double)dt : 0.0,
+                  g_z80.cyc ? 100.0*(double)g_hybrid_cyc/(double)g_z80.cyc : 0.0);
+          fflush(stderr);
+          lf=g_frame; lh=g_hybrid_cyc; lt=g_z80.cyc;
+      } }
+#endif
     if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
     if (g_audio_sink){
         /* Drain this frame's PSG output to the sink (interleaved stereo). The

@@ -76,6 +76,11 @@ static _Atomic uint32_t g_rq_head, g_rq_tail;
 static uint8_t        *g_requested;          /* 64K dedup bitmap (game-thread only) */
 static _Atomic uint64_t g_n_req, g_n_compiled, g_n_published, g_n_declined, g_n_failed;
 
+/* live coverage observability (read from any thread) */
+uint64_t sms_jit_published(void){ return atomic_load_explicit(&g_n_published, memory_order_relaxed); }
+uint64_t sms_jit_requested(void){ return atomic_load_explicit(&g_n_req,       memory_order_relaxed); }
+uint64_t sms_jit_declined (void){ return atomic_load_explicit(&g_n_declined,  memory_order_relaxed); }
+
 static pthread_t       g_worker;
 static pthread_mutex_t g_mx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv = PTHREAD_COND_INITIALIZER;
@@ -163,7 +168,13 @@ static int validate(ShardFn fn, const Request *r){
 
 static void process(Request *r){
     ShardFn fn = z80_sljit_compile(&r->mem[r->addr], (size_t)(0x10000 - r->addr), r->addr);
-    if (!fn){ atomic_fetch_add_explicit(&g_n_declined, 1, memory_order_relaxed); return; }
+    if (!fn){
+        atomic_fetch_add_explicit(&g_n_declined, 1, memory_order_relaxed);
+        fprintf(stderr, "[jit] DECLINE %04X: %s  (first blocker @ %04X: %s)\n",
+                r->addr, z80_sljit_last_decline.why, z80_sljit_last_decline.pc,
+                z80_sljit_last_decline.text);
+        return;
+    }
     atomic_fetch_add_explicit(&g_n_compiled, 1, memory_order_relaxed);
     if (validate(fn, r)){
         shard_publish(r->addr, fn);                   /* spike: publish on 1 clean pass */

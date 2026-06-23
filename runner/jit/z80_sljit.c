@@ -186,6 +186,45 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
     return 0;                                          /* unsupported -> decline */
 }
 
+ZjitDecline z80_sljit_last_decline;
+
+static const char *cf_reason(int cf){
+    switch (cf){
+        case Z80_CF_JUMP:      return "control flow: JP/JR/JP(HL)";
+        case Z80_CF_JUMP_COND: return "control flow: cond JP/JR/DJNZ";
+        case Z80_CF_CALL:      return "control flow: CALL/RST";
+        case Z80_CF_CALL_COND: return "control flow: cond CALL";
+        case Z80_CF_RET_COND:  return "control flow: cond RET";
+        default:               return "control flow";
+    }
+}
+static const char *why_unsupported(const Z80Insn *in){
+    if (in->prefix == Z80_PFX_CB) return "CB prefix (bit/rot/shift)";
+    if (in->prefix == Z80_PFX_ED) return "ED prefix (block ops / 16-bit ld(nn) / etc.)";
+    if (in->prefix == Z80_PFX_DD || in->prefix == Z80_PFX_FD) return "DD/FD prefix (IX/IY)";
+    uint8_t op = in->opcode;
+    if (op == 0xD3 || op == 0xDB) return "I/O: OUT (n),A / IN A,(n)";
+    if (op == 0xF3 || op == 0xFB) return "DI/EI (interrupt enable)";
+    if (op == 0x76)               return "HALT";
+    if (op == 0x27)               return "DAA";
+    if (op == 0x2F)               return "CPL";
+    if (op == 0x37 || op == 0x3F) return "SCF/CCF";
+    if (op == 0x08)               return "EX AF,AF'";
+    if (op == 0xD9)               return "EXX";
+    if (op == 0xEB)               return "EX DE,HL";
+    if (op == 0xE3)               return "EX (SP),HL";
+    if (op == 0xF9)               return "LD SP,HL";
+    return "other unsupported opcode";
+}
+static void set_decl(uint16_t pc, const Z80Insn *in, const char *why){
+    z80_sljit_last_decline.pc = pc;
+    z80_sljit_last_decline.prefix = (uint8_t)in->prefix;
+    z80_sljit_last_decline.opcode = in->opcode;
+    z80_sljit_last_decline.why = why;
+    for (int i = 0; i < (int)sizeof z80_sljit_last_decline.text; i++)
+        z80_sljit_last_decline.text[i] = in->text[i];
+}
+
 ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
     struct sljit_compiler *c = sljit_create_compiler(NULL);
     if (!c) return NULL;
@@ -197,10 +236,13 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
     while (off < len){
         Z80Insn in;
         int n = z80_decode(bytes + off, len - off, pc, &in);
-        if (n <= 0 || in.illegal){ ok = 0; break; }
-        if (!emit_one(c, &in)){ ok = 0; break; }       /* declined */
-        if (in.cf == Z80_CF_RET){ ended = 1; break; }  /* function terminator */
-        if (in.cf != Z80_CF_NONE){ ok = 0; break; }    /* P1a: fall-through + final RET only */
+        if (n <= 0 || in.illegal){ set_decl(pc, &in, "illegal/undecodable"); ok = 0; break; }
+        if (!emit_one(c, &in)){                         /* declined */
+            set_decl(pc, &in, in.cf != Z80_CF_NONE ? cf_reason(in.cf) : why_unsupported(&in));
+            ok = 0; break;
+        }
+        if (in.cf == Z80_CF_RET){ ended = 1; break; }   /* function terminator */
+        if (in.cf != Z80_CF_NONE){ set_decl(pc, &in, cf_reason(in.cf)); ok = 0; break; }
         off += (size_t)n; pc = (uint16_t)(pc + n);
     }
 
