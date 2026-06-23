@@ -21,9 +21,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- shard table: lock-free for the reader (game thread) ----------------- */
+/* ---- shard table: lock-free for the reader (game thread) -----------------
+ * Keyed by (addr, code-CRC): the same Z80 address hosts DIFFERENT functions
+ * under different mapped ROM banks (e.g. Sonic Blast 0x8000 cycles through banks
+ * 0x1B/0x3B/0x3A — three distinct routines at one address). A shard therefore
+ * stores the reachable byte extent [addr, addr+span) it compiled from and a CRC
+ * over those live bytes; the game-thread lookup recomputes the CRC over the
+ * CURRENTLY-mapped live bytes and only runs the shard whose CRC matches. The
+ * open-addressed table holds multiple shards per addr (a candidate chain): they
+ * occupy consecutive slots in addr's probe sequence, so the lookup scans them
+ * all and picks the bank-matching one (SLJIT.md §4 / §8.5). */
 typedef struct Shard {
     uint16_t       addr;
+    uint16_t       span;                 /* reachable extent: bytes [addr, addr+span) */
+    uint32_t       crc;                  /* CRC of those bytes at compile time */
     ShardFn        fn;
     _Atomic int    trusted;
 } Shard;
@@ -37,20 +48,38 @@ static inline uint32_t shard_hash(uint16_t addr){
     return (uint32_t)((addr * 2654435761u) >> (32 - SHARD_BITS)) & SHARD_MASK;
 }
 
+/* FNV-1a over a span of the contiguous address range, read through the live bus.
+ * Identical algorithm to crc over the request snapshot (crc_buf) so the same
+ * bank yields the same value. (Buffer form used at compile; live form at lookup.) */
+static uint32_t crc_buf(const uint8_t *p, uint16_t span){
+    uint32_t h = 2166136261u;
+    for (uint16_t i = 0; i < span; i++){ h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+static uint32_t crc_live(uint16_t addr, uint16_t span){
+    uint32_t h = 2166136261u;
+    for (uint16_t i = 0; i < span; i++){ h ^= sms_read8((uint16_t)(addr + i)); h *= 16777619u; }
+    return h;
+}
+
 ShardFn sms_jit_lookup(uint16_t addr){
     uint32_t h = shard_hash(addr);
     for (uint32_t i = 0; i < SHARD_SIZE; i++){
         Shard *s = atomic_load_explicit(&g_slots[(h + i) & SHARD_MASK], memory_order_acquire);
         if (!s) return NULL;
-        if (s->addr == addr && atomic_load_explicit(&s->trusted, memory_order_acquire))
-            return s->fn;
+        if (s->addr == addr && atomic_load_explicit(&s->trusted, memory_order_acquire)){
+            /* bank-alias guard: only run this shard if the live bytes it would
+             * execute still match what it compiled from. Mismatch => a different
+             * bank is mapped here now; keep scanning for that variant's shard. */
+            if (crc_live(addr, s->span) == s->crc) return s->fn;
+        }
     }
     return NULL;
 }
 
-static void shard_publish(uint16_t addr, ShardFn fn){
+static void shard_publish(uint16_t addr, uint16_t span, uint32_t crc, ShardFn fn){
     Shard *sh = (Shard*)calloc(1, sizeof *sh);
-    sh->addr = addr; sh->fn = fn;
+    sh->addr = addr; sh->span = span; sh->crc = crc; sh->fn = fn;
     atomic_store_explicit(&sh->trusted, 1, memory_order_release);
     uint32_t h = shard_hash(addr);
     for (uint32_t i = 0; i < SHARD_SIZE; i++){
@@ -73,8 +102,48 @@ typedef struct Request {
 #define RQ_CAP 64
 static Request        *g_rq[RQ_CAP];
 static _Atomic uint32_t g_rq_head, g_rq_tail;
-static uint8_t        *g_requested;          /* 64K dedup bitmap (game-thread only) */
 static _Atomic uint64_t g_n_req, g_n_compiled, g_n_published, g_n_declined, g_n_failed;
+
+/* request dedup keyed by (addr, code-version) — NOT addr alone. A bank change at
+ * the same Z80 address is a different function and must be allowed through, else
+ * only the first bank variant ever compiles and the others stay on the interpreter
+ * forever (the 0x8000 bug). The code-version is a cheap FNV over a fixed window of
+ * the live bytes at addr, distinct per mapped ROM bank. Game-thread-only; no atomics. */
+#define REQSET_BITS  13
+#define REQSET_SIZE  (1u << REQSET_BITS)
+#define REQSET_MASK  (REQSET_SIZE - 1u)
+#define REQ_WIN      256                     /* bytes hashed to distinguish bank variants */
+typedef struct { uint32_t winhash; uint16_t addr; uint8_t used; } ReqKey;
+static ReqKey *g_reqset;                      /* REQSET_SIZE entries (game-thread only) */
+
+static uint32_t req_winhash(uint16_t addr){
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < REQ_WIN; i++){ h ^= sms_read8((uint16_t)(addr + i)); h *= 16777619u; }
+    return h;
+}
+/* 1 if (addr,winhash) has already been requested; 0 otherwise. Pure query — does NOT
+ * insert. Insertion is reqset_mark(), called ONLY after a request is actually enqueued,
+ * so a request dropped on a full queue is NOT recorded and WILL be retried on a later
+ * miss (otherwise that bank variant would never compile). */
+static int reqset_seen(uint16_t addr, uint32_t winhash){
+    if (!g_reqset) return 0;
+    uint32_t h = (uint32_t)(((addr ^ winhash) * 2654435761u) >> (32 - REQSET_BITS)) & REQSET_MASK;
+    for (uint32_t i = 0; i < REQSET_SIZE; i++){
+        ReqKey *k = &g_reqset[(h + i) & REQSET_MASK];
+        if (!k->used) return 0;
+        if (k->addr == addr && k->winhash == winhash) return 1;
+    }
+    return 0;
+}
+static void reqset_mark(uint16_t addr, uint32_t winhash){
+    if (!g_reqset) return;
+    uint32_t h = (uint32_t)(((addr ^ winhash) * 2654435761u) >> (32 - REQSET_BITS)) & REQSET_MASK;
+    for (uint32_t i = 0; i < REQSET_SIZE; i++){
+        ReqKey *k = &g_reqset[(h + i) & REQSET_MASK];
+        if (!k->used){ k->used = 1; k->addr = addr; k->winhash = winhash; return; }
+        if (k->addr == addr && k->winhash == winhash) return;
+    }
+}
 
 /* live coverage observability (read from any thread) */
 uint64_t sms_jit_published(void){ return atomic_load_explicit(&g_n_published, memory_order_relaxed); }
@@ -88,10 +157,11 @@ static _Atomic int     g_run;
 static int             g_started;
 
 void sms_jit_request(uint16_t addr){
-    if (g_requested && g_requested[addr]) return;     /* dedup (game-thread only) */
+    uint32_t wh = req_winhash(addr);
+    if (reqset_seen(addr, wh)) return;                /* dedup by (addr, bank variant) */
     uint32_t head = atomic_load_explicit(&g_rq_head, memory_order_relaxed);
     uint32_t tail = atomic_load_explicit(&g_rq_tail, memory_order_acquire);
-    if (head - tail >= RQ_CAP) return;                /* full: drop, may re-request later */
+    if (head - tail >= RQ_CAP) return;                /* full: drop WITHOUT marking -> retried later */
 
     Request *r = (Request*)malloc(sizeof *r);
     if (!r) return;
@@ -100,7 +170,7 @@ void sms_jit_request(uint16_t addr){
     for (uint32_t a = 0; a < 0x10000; a++)            /* entry memory snapshot (live bus) */
         r->mem[a] = sms_read8((uint16_t)a);
 
-    if (g_requested) g_requested[addr] = 1;
+    reqset_mark(addr, wh);                             /* record only now that it's enqueued */
     g_rq[head & (RQ_CAP - 1)] = r;
     atomic_store_explicit(&g_rq_head, head + 1, memory_order_release);
     atomic_fetch_add_explicit(&g_n_req, 1, memory_order_relaxed);
@@ -206,10 +276,16 @@ static void process(Request *r){
         return;
     }
     atomic_fetch_add_explicit(&g_n_compiled, 1, memory_order_relaxed);
+    /* Identity of this shard: the reachable bytes it compiled from. Computed over
+     * the request's frozen snapshot, which is exactly what the emitter decoded, so
+     * it equals crc_live() whenever the same ROM bank is mapped at run time. */
+    uint16_t span = z80_sljit_last_span;
+    uint32_t crc  = crc_buf(&r->mem[r->addr], span);
     if (validate(fn, r)){
-        shard_publish(r->addr, fn);                   /* spike: publish on 1 clean pass */
+        shard_publish(r->addr, span, crc, fn);        /* spike: publish on 1 clean pass */
         atomic_fetch_add_explicit(&g_n_published, 1, memory_order_relaxed);
-        fprintf(stderr, "[jit] shard PUBLISHED for %04X (validated byte-exact vs interp)\n", r->addr);
+        fprintf(stderr, "[jit] shard PUBLISHED for %04X (span %u, crc %08X, validated byte-exact vs interp)\n",
+                r->addr, span, crc);
     } else {
         sljit_free_code((void*)fn, NULL);
         atomic_fetch_add_explicit(&g_n_failed, 1, memory_order_relaxed);
@@ -278,7 +354,7 @@ static void jit_selftest(void){
 
 void sms_jit_init(void){
     if (g_started) return;
-    g_requested = (uint8_t*)calloc(0x10000, 1);
+    g_reqset = (ReqKey*)calloc(REQSET_SIZE, sizeof *g_reqset);
     atomic_store_explicit(&g_run, 1, memory_order_release);
     if (pthread_create(&g_worker, NULL, worker_main, NULL) != 0){
         fprintf(stderr, "[jit] worker thread create failed; Tier-2 disabled\n");
@@ -302,7 +378,7 @@ void sms_jit_shutdown(void){
             (unsigned long long)atomic_load(&g_n_published),
             (unsigned long long)atomic_load(&g_n_declined),
             (unsigned long long)atomic_load(&g_n_failed));
-    free(g_requested); g_requested = NULL;
+    free(g_reqset); g_reqset = NULL;
 }
 
 #endif /* SMS_HAVE_JIT */

@@ -21,8 +21,17 @@
 static uint8_t g_img[0x10000];   /* base image (code) */
 static uint8_t g_A[0x10000], g_B[0x10000];   /* shard / superzazu working copies */
 
+/* The straight-line test can synthesize a self-modifying write (e.g. LD H,$10 then
+ * LD (HL),n lands in the code page). A shard runs its PRECOMPILED code and cannot
+ * self-modify mid-run (the recomp model; the code-CRC guard re-checks only at the
+ * next dispatch) — so write-protect the code region on BOTH sides to model that
+ * faithfully, instead of constraining the generator and losing opcode coverage. */
+static uint16_t g_code_lo, g_code_hi;
 static uint8_t bus_r8(void *c, uint16_t a){ return ((uint8_t*)c)[a]; }
-static void    bus_w8(void *c, uint16_t a, uint8_t v){ ((uint8_t*)c)[a] = v; }
+static void    bus_w8(void *c, uint16_t a, uint8_t v){
+    if (a >= g_code_lo && a < g_code_hi) return;          /* ignore self-modify of code */
+    ((uint8_t*)c)[a] = v;
+}
 static uint8_t bus_in(void *c, uint8_t p){ (void)c; (void)p; return 0xFF; }
 static void    bus_out(void *c, uint8_t p, uint8_t v){ (void)c; (void)p; (void)v; }
 static uint8_t sz_in (z80 *z, uint8_t p){ (void)z; (void)p; return 0xFF; }
@@ -53,7 +62,7 @@ int main(int argc, char **argv){
         size_t len = 0;
         int dr, sr, g, pp;
         for (int k = 0; k < count; k++){
-            switch (rand() % 28){
+            switch (rand() % 31){
                 case 0:  g_img[base+len++]=0x00; break;                                  /* NOP       */
                 case 1:  dr=SUP_REG[rand()%7]; sr=SUP_REG[rand()%7];
                          g_img[base+len++]=(uint8_t)(0x40|(dr<<3)|sr); break;             /* LD r,r'   */
@@ -91,9 +100,17 @@ int main(int argc, char **argv){
                 case 25: g_img[base+len++]=0x08; break;                                  /* EX AF,AF' */
                 case 26: g_img[base+len++]=0xEB; break;                                  /* EX DE,HL  */
                 case 27: g_img[base+len++]=0xD9; break;                                  /* EXX       */
+                case 28: g_img[base+len++]=(rand()&1)?0x34:0x35; break;                   /* INC/DEC (HL) */
+                case 29: { int reg=SUP_REG[rand()%7];                                     /* CB reg (rot/BIT/RES/SET) */
+                           g_img[base+len++]=0xCB;
+                           g_img[base+len++]=(uint8_t)(((rand()%4)<<6)|((rand()%8)<<3)|reg); } break;
+                case 30: { static const int GRP[3]={0,2,3};  /* rot/RES/SET on (HL); skip BIT (WZ X/Y) */
+                           g_img[base+len++]=0xCB;
+                           g_img[base+len++]=(uint8_t)((GRP[rand()%3]<<6)|((rand()%8)<<3)|6); } break;
             }
         }
         g_img[base+len++] = 0xC9;        /* RET */
+        g_code_lo = base; g_code_hi = (uint16_t)(base + len);   /* write-protect code page */
 
         /* seed: pointer regs into safe RAM (HL=D0xx, BC=D1xx, DE=D2xx), sp=CFxx */
         Z80State seed; memset(&seed, 0, sizeof seed);
@@ -137,7 +154,9 @@ int main(int argc, char **argv){
                   (memcmp(g_A, g_B, sizeof g_A) != 0);
         if (bad){
             if (fails < 10){
-                fprintf(stderr,"[diff] MISMATCH it=%ld count=%d:\n", it, count);
+                fprintf(stderr,"[diff] MISMATCH it=%ld count=%d bytes:", it, count);
+                for (size_t bi=0; bi<len; bi++) fprintf(stderr," %02X", g_img[base+bi]);
+                fprintf(stderr,"\n");
                 fprintf(stderr,"  shard A=%02X F=%02X BC=%02X%02X DE=%02X%02X HL=%02X%02X SP=%04X cyc=%llu mem=%s\n",
                         st.a,st.f,st.b,st.c,st.d,st.e,st.h,st.l,st.sp,(unsigned long long)st.cyc,
                         memcmp(g_A,g_B,sizeof g_A)?"DIFF":"ok");

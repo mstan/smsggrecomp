@@ -20,6 +20,8 @@
 /* flag-exact helpers (z80_sljit_helpers.c), backed by z80_ops.h */
 extern long z80h_inc8(Z80State *s, long v);
 extern long z80h_dec8(Z80State *s, long v);
+extern void z80h_inc_hlm(Z80State *s, const Bus *b), z80h_dec_hlm(Z80State *s, const Bus *b);
+extern void z80h_cb(Z80State *s, const Bus *b, long cb_byte);
 extern void z80h_add(Z80State *s, long v), z80h_adc(Z80State *s, long v);
 extern void z80h_sub(Z80State *s, long v), z80h_sbc(Z80State *s, long v);
 extern void z80h_and(Z80State *s, long v), z80h_xor(Z80State *s, long v);
@@ -57,6 +59,8 @@ extern void z80h_ld_r_hl(Z80State*,const Bus*,long), z80h_ld_hl_r(Z80State*,cons
             z80h_push(Z80State*,const Bus*,long), z80h_pop(Z80State*,const Bus*,long),
             z80h_out_n(Z80State*,const Bus*,long);
 extern long z80h_call(Z80State*,const Bus*,long);
+extern void z80h_jp_hl(Z80State*,const Bus*);
+extern void z80h_jp_to(Z80State*,const Bus*,long);
 
 /* void h(Z80State*, const Bus*, long w) */
 static void emit_call_sbw(struct sljit_compiler *c, void *fn, sljit_sw w){
@@ -140,7 +144,15 @@ static void emit_call(struct sljit_compiler *c, uint16_t target, uint16_t ret, i
 
 /* Emit one instruction. Returns 1 if emitted, 0 to decline the whole function. */
 static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
-    if (in->prefix != Z80_PFX_NONE) return 0;          /* P1a: no prefix groups */
+    if (in->prefix == Z80_PFX_CB){                     /* CB: rotate/shift, BIT, RES, SET */
+        uint8_t cb = in->opcode;                       /* sub-opcode (byte after CB) */
+        int reg = cb & 7, grp = cb >> 6;               /* reg 6 = (HL); grp 1 = BIT */
+        int cyc = (reg == 6) ? (grp == 1 ? 12 : 15) : 8;
+        emit_call_sbw(c, (void*)z80h_cb, (sljit_sw)cb);
+        emit_tick(c, cyc);
+        return 1;
+    }
+    if (in->prefix != Z80_PFX_NONE) return 0;          /* DD/FD/ED/DDCB/FDCB: declined */
     uint8_t op = in->opcode;
 
     if (op == 0x00){ emit_tick(c, 4); return 1; }      /* NOP */
@@ -172,10 +184,14 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
         return 1;
     }
 
-    if ((op & 0xC7) == 0x04 || (op & 0xC7) == 0x05){   /* INC r / DEC r */
-        sljit_sw o = reg8_off((op >> 3) & 7);
-        if (o < 0) return 0;                           /* INC/DEC (HL) */
+    if ((op & 0xC7) == 0x04 || (op & 0xC7) == 0x05){   /* INC r / DEC r / (HL) */
         int isdec = ((op & 0xC7) == 0x05);
+        sljit_sw o = reg8_off((op >> 3) & 7);
+        if (o < 0){                                    /* INC/DEC (HL): RMW via bus, 11T */
+            emit_call_sb(c, isdec ? (void*)z80h_dec_hlm : (void*)z80h_inc_hlm);
+            emit_tick(c, 11);
+            return 1;
+        }
         sljit_emit_op1(c, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0);                 /* arg0 = Z80State* */
         sljit_emit_op1(c, SLJIT_MOV_U8, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), o);  /* arg1 = reg value */
         sljit_emit_icall(c, SLJIT_CALL, SLJIT_ARGS2(W, P, W),
@@ -226,10 +242,10 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
     if ((op & 0xCF) == 0xC5){ emit_call_sbw(c,(void*)z80h_push,(op>>4)&3); emit_tick(c,11); return 1; }          /* PUSH rr  */
     if ((op & 0xCF) == 0xC1){ emit_call_sbw(c,(void*)z80h_pop ,(op>>4)&3); emit_tick(c,10); return 1; }          /* POP rr   */
 
-    /* OUT (0xD3) emittable + gate-correct, but re-declined: even with the P1f sync model,
-     * 0x8000 (the OUT-bearing frame routine) still diverges live — a DEEPER cause than sync
-     * (identical divergence with/without sync; suspect bank-aliased code or 1-pass-validation
-     * insufficiency). Keep OUT/CALL gated until that is root-caused. See SLJIT.md §8.5. */
+    /* OUT (n),A — port write logged/compared off-thread, applied live. Safe now that
+     * the bank-alias guard (code-CRC in the shard table) stops a frame-spanning OUT
+     * shard from running under the wrong bank (SLJIT.md §8.5). */
+    if (op == 0xD3){ emit_call_sbw(c,(void*)z80h_out_n, in->imm); emit_tick(c,11); return 1; } /* OUT (n),A */
 
     if (op == 0x2F){ emit_call_s(c,(void*)z80h_cpl);     emit_tick(c,4); return 1; }  /* CPL */
     if (op == 0x27){ emit_call_s(c,(void*)z80h_daa);     emit_tick(c,4); return 1; }  /* DAA */
@@ -250,6 +266,12 @@ static int emit_one(struct sljit_compiler *c, const Z80Insn *in){
 }
 
 ZjitDecline z80_sljit_last_decline;
+/* Reachable byte extent [base, base+span) of the last SUCCESSFUL compile. The
+ * shard table stores this + a CRC over the live bytes in that range to detect
+ * bank-aliasing: the same Z80 address hosts different code under different mapped
+ * ROM banks, so a shard must only run when the live bytes match what it compiled
+ * from (SLJIT.md §4 / §8.5). */
+uint16_t z80_sljit_last_span;
 
 static const char *cf_reason(int cf){
     switch (cf){
@@ -315,6 +337,21 @@ static struct sljit_label  *g_lab[SPAN];
 static uint16_t             g_work[SPAN];
 static PendJump             g_pend[2*SPAN];
 
+static inline int oow(uint16_t target, uint16_t base){
+    int r = (int)target - (int)base; return r < 0 || r >= SPAN;   /* out of function window */
+}
+/* Wire a taken/unconditional jump J to its static target. In-window target -> a pending
+ * label fixup (resolved in pass 2's wiring loop). Out-of-window target -> a tail jump to
+ * another function: an inline block that dispatches to the target and returns (the same
+ * tail model as JP (HL)), with J jumping into it. */
+static void wire_jump(struct sljit_compiler *c, struct sljit_jump *J, uint16_t target,
+                      uint16_t base, int *np){
+    if (!oow(target, base)){ g_pend[*np].j = J; g_pend[(*np)++].target = target; return; }
+    sljit_set_label(J, sljit_emit_label(c));
+    emit_call_sbw(c, (void*)z80h_jp_to, (sljit_sw)target);
+    sljit_emit_return_void(c);
+}
+
 ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
     /* ---- pass 1: reachability (follow control flow; bound to [base, base+SPAN)) ---- */
     memset(g_seen, 0, sizeof g_seen);
@@ -340,18 +377,37 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                 if (in.cf == Z80_CF_RET_COND) {}                       /* also returns; no succ for that edge */
                 break;
             case Z80_CF_JUMP:                                          /* JP nn / JR e / JP(HL) */
-                if (!in.has_target){ set_decl(a, &in, "computed jump JP(HL/IX/IY)"); return NULL; }
-                g_work[wn++] = in.target;
+                if (!in.has_target){
+                    /* JP (HL) (op 0xE9, no prefix): computed tail dispatch (jump-table
+                     * dispatcher). Terminator here; pass 2 emits a runtime dispatch to HL.
+                     * JP (IX)/(IY) carry a DD/FD prefix -> still declined. */
+                    if (in.prefix == Z80_PFX_NONE && in.opcode == 0xE9) break;
+                    set_decl(a, &in, "computed jump JP(IX/IY)"); return NULL;
+                }
+                /* in-window target: internal branch (walk it). Out-of-window static
+                 * target: tail jump to another function -> terminator, pass 2 emits a
+                 * runtime dispatch to it (same tail model as JP (HL)). */
+                { int trel = (int)in.target - (int)base;
+                  if (trel >= 0 && trel < SPAN) g_work[wn++] = in.target; }
                 break;
             case Z80_CF_JUMP_COND:                                     /* JR cc / JP cc / DJNZ */
                 if (!in.has_target){ set_decl(a, &in, cf_reason(in.cf)); return NULL; }
-                g_work[wn++] = in.target;
-                g_work[wn++] = (uint16_t)(a + n);
+                { int trel = (int)in.target - (int)base;
+                  if (trel < 0 || trel >= SPAN){
+                      /* conditional far jump: the taken edge tail-dispatches (pass 2),
+                       * the not-taken edge always falls through. */
+                      g_work[wn++] = (uint16_t)(a + n);
+                  } else {
+                      g_work[wn++] = in.target;
+                      g_work[wn++] = (uint16_t)(a + n);
+                  } }
                 break;
             case Z80_CF_CALL: case Z80_CF_CALL_COND:
-                /* re-declined with OUT: frame-spanning routines (0x8000) still diverge live
-                 * for a cause deeper than sync — see the OUT note above and SLJIT.md §8.5. */
-                set_decl(a, &in, "CALL (frame routine diverges - deeper than sync; see SLJIT.md)"); return NULL;
+                /* Execution resumes after the call returns; the callee is NOT walked
+                 * here — it is re-entered through the dispatcher (any tier) by the
+                 * emit_call helper. Both CALL and CALL cc fall through to a+n. */
+                g_work[wn++] = (uint16_t)(a + n);
+                break;
             case Z80_CF_RET: default: break;                           /* terminator */
         }
     }
@@ -393,9 +449,20 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                 break;
             }
             case Z80_CF_JUMP: {
+                if (op == 0xE9){                            /* JP (HL): computed tail dispatch */
+                    emit_tick(c, 4);
+                    emit_call_sb(c, (void*)z80h_jp_hl);     /* re-enter dispatcher at HL */
+                    sljit_emit_return_void(c);              /* tail: shard is done */
+                    break;
+                }
                 emit_tick(c, op == 0x18 ? 12 : 10);         /* JR e : JP nn */
-                struct sljit_jump *Ju = sljit_emit_jump(c, SLJIT_JUMP);
-                g_pend[np].j = Ju; g_pend[np++].target = in.target;
+                if (oow(in.target, base)){                  /* far jump = tail to another fn */
+                    emit_call_sbw(c, (void*)z80h_jp_to, (sljit_sw)in.target);
+                    sljit_emit_return_void(c);
+                } else {
+                    struct sljit_jump *Ju = sljit_emit_jump(c, SLJIT_JUMP);
+                    g_pend[np].j = Ju; g_pend[np++].target = in.target;
+                }
                 break;
             }
             case Z80_CF_JUMP_COND: {
@@ -408,7 +475,7 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                     struct sljit_jump *Js = sljit_emit_jump(c, SLJIT_JUMP);
                     sljit_set_label(Jt, sljit_emit_label(c)); emit_tick(c, 13);
                     struct sljit_jump *Jto = sljit_emit_jump(c, SLJIT_JUMP);
-                    g_pend[np].j = Jto; g_pend[np++].target = in.target;
+                    wire_jump(c, Jto, in.target, base, &np);
                     g_pend[np].j = Js;  g_pend[np++].target = ft;
                 } else if ((op & 0xE7) == 0x20){            /* JR cc (12/7) */
                     sljit_s32 jt = emit_cc(c, (op>>3)&3);
@@ -417,13 +484,24 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
                     struct sljit_jump *Js = sljit_emit_jump(c, SLJIT_JUMP);
                     sljit_set_label(Jt, sljit_emit_label(c)); emit_tick(c, 12);
                     struct sljit_jump *Jto = sljit_emit_jump(c, SLJIT_JUMP);
-                    g_pend[np].j = Jto; g_pend[np++].target = in.target;
+                    wire_jump(c, Jto, in.target, base, &np);
                     g_pend[np].j = Js;  g_pend[np++].target = ft;
                 } else {                                    /* JP cc (10, taken or not) */
                     emit_tick(c, 10);
                     sljit_s32 jt = emit_cc(c, (op>>3)&7);
                     struct sljit_jump *Jt = sljit_emit_jump(c, jt);
-                    g_pend[np].j = Jt; g_pend[np++].target = in.target;  /* fall through naturally */
+                    if (oow(in.target, base)){
+                        /* taken = far tail jump; add an explicit skip so the not-taken
+                         * path falls through PAST the inline tail block (Jt is the
+                         * conditional jump itself, so it can't share wire_jump's layout). */
+                        struct sljit_jump *Jcont = sljit_emit_jump(c, SLJIT_JUMP);
+                        sljit_set_label(Jt, sljit_emit_label(c));
+                        emit_call_sbw(c, (void*)z80h_jp_to, (sljit_sw)in.target);
+                        sljit_emit_return_void(c);
+                        g_pend[np].j = Jcont; g_pend[np++].target = ft;
+                    } else {
+                        g_pend[np].j = Jt; g_pend[np++].target = in.target;  /* fall through */
+                    }
                 }
                 break;
             }
@@ -454,6 +532,7 @@ ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base){
 
     void *code = sljit_generate_code(c, 0, NULL);
     sljit_free_compiler(c);
+    z80_sljit_last_span = (uint16_t)maxrel;        /* reachable extent for the code-CRC check */
     return (ShardFn)code;
 }
 

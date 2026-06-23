@@ -1,12 +1,25 @@
 # SLJIT.md — Tier-2 sljit shard JIT for smsggrecomp
 
-**Status: design / not started (2026-06-22).** This specifies adding the middle
-execution tier — an in-process sljit JIT — that smsggrecomp is missing relative
-to the sibling recompilers. Companion to `PRINCIPLES.md`. Sibling references:
+**Status: implemented + byte-exact, OPT-IN (`-DSMS_HAVE_JIT`), NOT default-on (2026-06-22).**
+The middle execution tier — an in-process off-thread sljit JIT — is built, validated
+byte-exact, and gated off by default. Companion to `PRINCIPLES.md`. Sibling references:
 `../psxrecomp/SLJIT.md` (the originating MIPS design, shipped + live-validated)
 and `../gbarecomp/gbarecomp/docs/SLJIT.md` (the ARM port, on-by-default). **Read
 those for the family rationale; this doc only states what is the same and what is
 deliberately different for the Z80 SMS/GG engine.**
+
+> **STRATEGIC CALL (2026-06-22) — keep opt-in, do NOT pursue default-on for this engine.**
+> Measured headless: pure interpretation already runs Sonic Blast GG at ~3,000× realtime
+> on a modern PC — there is **no perf bottleneck to solve** on SMS/GG. JIT-ON is in fact
+> *slower* than JIT-OFF (worker-validation + per-dispatch lookup + Bus-indirection cost),
+> and the shards reduce interp by ~0% net (28.31% → 28.15%): they shard the small
+> jump-table *dispatcher prologues*, while the heavy interp cycles live in routines using
+> `IN`/`ED`/live device state that the precision gate correctly refuses to shard. So
+> coverage % rises without a perf win. **Value delivered = the byte-exact OFF-THREAD
+> reference design** for the family (psxrecomp/gbarecomp, where on-thread JIT caused the
+> audio stutters and the target systems are genuinely demanding). Default-on here would
+> regress speed for zero user-visible benefit. The productive next step is porting this
+> off-thread model to the siblings, not widening this engine's emitter. See §8.6 / §8.7.
 
 ---
 
@@ -320,6 +333,96 @@ frame-spanning routines compile), so only short, non-sync-crossing routines shar
 game is byte-exact (CRAM/REG 100%, verified). The sync model + OUT/CALL emit + gate
 handling are all implemented and harness-verified, gated off pending the investigation
 above.
+
+**RESOLVED (2026-06-22) — it was bank-aliased code.** Confirmed with an always-on
+dispatch-miss probe (`glue.c` `mb_record`/`mb_dump`, env `SMS_MISSBANK`): at every
+`$8000` dispatch the mapped `bank[2]` cycles `0x1B → 0x3B → 0x3A` (first seen frames
+57 / 187 / 615), and the entry bytes differ from byte 0 (`C5 D5 E5…` PUSH BC/DE/HL vs
+`3A 2F D1…` LD A,(D12F) vs `3A 3F D1…`). So `$8000` hosts **three different functions**;
+the address-only shard table ran the bank-`0x1B` shard under banks `0x3B`/`0x3A` in the
+title era (frames 187–810) → exactly the measured 23/34/72% divergence.
+
+Fix (three pieces, all required):
+1. **Code-CRC identity.** The emitter exposes the reachable extent `z80_sljit_last_span`;
+   each `Shard` stores `(addr, span, crc)` (CRC over the bytes it compiled from). The
+   game-thread `sms_jit_lookup` recomputes the CRC over the *currently mapped* live bytes
+   and runs the shard only on a match — else it keeps scanning / falls to interp.
+2. **Candidate chain.** The open-addressed table holds multiple shards per address; the
+   lookup scans them all and picks the bank-matching one.
+3. **Dedup by `(addr, code-version)`.** The address-only `g_requested` bitmap is replaced
+   by an `(addr, window-hash)` set, so each bank variant enqueues independently instead of
+   the first one permanently blocking the rest.
+
+With this, OUT/CALL are re-enabled and the game is byte-exact to the `--interp` oracle:
+CRAM 810/810, REG 810/810; VRAM 799/810 (all 11 in the benign intro window 469–651, zero
+in the title era). Sonic 1 tripwire unchanged (JIT inert, 0 shards). The three `$8000`
+variants now behave correctly: `0x1B` publishes byte-exact (runs frames 57–186); `0x3B`/
+`0x3A` decline cleanly on unsupported ops (`jp (hl)` jump table @ `800F`; out-of-window
+branch @ `A4A0`) and stay Tier-3. None mis-compile.
+
+**Remaining (next milestone — coverage, not correctness):** title-era interp% is still
+~32% because those two `$8000` variants decline on *emitter gaps* (computed `jp (hl)`,
+branch outside the 2 KB window), and line-IRQ raster routine `1AAF` fails off-thread
+validation (hypothesis #3 — reads live device state mid-frame; correctly pinned to interp).
+Lowering interp% needs emitter coverage (jump tables, wider windows), tracked separately.
+
+---
+
+## 8.6 Emitter coverage pass (2026-06-22, after §8.5 fix)
+
+Widened the emitter, all byte-exact (harnesses + game CRAM/REG 810/810 maintained
+throughout; shard count 1 → 14 on Sonic Blast; interp 32% → 29.6% over 2400 frames):
+
+- **`JP (HL)` (tail dispatch).** The jump-table dispatcher idiom (`ld a,(hl); inc hl;
+  ld h,(hl); ld l,a; jp (hl)`). Pass 1 treats `jp (hl)` (op 0xE9, no prefix) as a
+  terminator; pass 2 emits `z80h_jp_hl` = `bus->call(HL)` then return. No table decode
+  needed — the runtime resolves HL and the dispatcher runs the target (any tier). If a
+  site were a computed CALL (`push ret; jp (hl)`) the gate catches the divergence and
+  declines, so the tail form is precision-safe. This unblocked the bank-`0x3B` `$8000`
+  dispatcher and cascaded into its targets.
+- **Far `JP/JR nn` (tail dispatch).** A static jump whose target is outside the function
+  window `[base, base+2KB)` is a tail jump to another function: `z80h_jp_to` + return
+  (unconditional inline; conditional via `wire_jump`/explicit skip). Same tail model.
+- **CB group** (RLC/RRC/RL/RR/SLA/SRA/SLL/SRL, BIT, RES, SET on r and (HL)) via one
+  `z80h_cb(s,bus,cb_byte)` helper backed by z80_ops.h. BIT n,(HL) X/Y flags use WZ,
+  which the shard doesn't track — such a shard simply fails the gate and stays interp.
+- **`INC/DEC (HL)`** (memory RMW) via `z80h_inc_hlm`/`z80h_dec_hlm`.
+- **Dropped-request dedup bug fixed.** The `(addr,winhash)` set was marking a request as
+  seen BEFORE the queue-full check, so a request dropped on a full queue was never
+  retried. Now it marks only after a successful enqueue.
+- **Diff harness extended** (CB + INC/DEC (HL)) and made self-modify-safe by
+  write-protecting the code page on both sides (a shard runs precompiled code and can't
+  self-modify mid-run — the faithful model), so the generator keeps full opcode coverage.
+
+**Still interp (next buckets, by cycle weight):** the bank-`0x3A` `$8000` variant no
+longer top-level-dispatches in the 810f window (reached nested-in-interp; a dispatch-
+dynamics question, not an emitter gap); ED block ops/`LDIR` (`8AF4`, `8284`, `8254`);
+DD/FD IX/IY (`5476`, `53EA`, `8150`); `LD (nn),HL`/`LD HL,(nn)` (op 0x22/0x2A — `3645`,
+`1E0F`); `IN` (`1A42`); `1AAF`/`81DD` fail validation (hypothesis #3, live device state).
+
+---
+
+## 8.7 Performance measurement (2026-06-22) — why this stays opt-in
+
+Headless flat-out timing (frame cap is windowed-only), Sonic Blast GG, JIT-ON
+(`-DSMS_HAVE_JIT`, static + 14 shards) vs JIT-OFF (static + hybrid-interp for misses,
+= the shipped behavior):
+
+- **Realtime headroom:** JIT-OFF runs at ~180K fps headless = **~3,000× realtime**. The
+  interpreter is nowhere near a bottleneck on a modern PC.
+- **JIT-ON is slower, never faster** across repeated 12k/60k-frame runs (−26% to −118%;
+  variance is the off-thread validation worker's one-time warm-up burst — it idles after
+  15 compiles, confirmed identical compile counts at 2.4k and 12k frames).
+- **Shards reduce interp by ~0% net:** JIT-OFF 28.31% interp vs JIT-ON 28.15% (deterministic,
+  noise-free). The shards cover the tiny dispatcher prologues; the heavy cycles stay interp.
+
+Conclusion: on SMS/GG-on-PC the JIT cannot pay for itself — the thing it optimizes isn't a
+bottleneck, and the cycles it *could* save are gated out by precision-over-recall. It is a
+**correct, byte-exact, off-thread reference implementation**, valuable to the family, kept
+opt-in. To make it a real win you would need (a) to shard the `IN`/`ED`/device-state routines
+(solving hypothesis #3 — validating routines that read live device state) AND (b) to remove
+the live shard's Bus-indirection (which exists so the same binary validates off-thread on a
+snapshot) — a large effort whose payoff only appears on hardware far weaker than a PC.
 
 ---
 

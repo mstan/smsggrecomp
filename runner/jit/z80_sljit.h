@@ -26,6 +26,10 @@ typedef struct {
 } ZjitDecline;
 extern ZjitDecline z80_sljit_last_decline;
 
+/* Reachable byte extent [base, base+span) of the last z80_sljit_compile() that
+ * returned non-NULL. Used by the shard table for the bank-alias code-CRC check. */
+extern uint16_t z80_sljit_last_span;
+
 ShardFn z80_sljit_compile(const uint8_t *bytes, size_t len, uint16_t base);
 
 #endif /* SMS_Z80_SLJIT_H */

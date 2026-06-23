@@ -104,6 +104,95 @@ static uint64_t fnv1a64(const void *buf, size_t n){
     return h;
 }
 
+/* ---- always-on dispatch-miss bank/code ring (Tier-2 bank-alias probe) ----
+ * Every sms_dispatch_miss() records (frame, addr, banks, live-code CRC) into a
+ * ring from frame 0 onward. The CRC is FNV over a 256-byte window read through
+ * the LIVE bus at the miss target, so it captures exactly which banked bytes the
+ * CPU would execute there. Query (dump) at run end to ask: for a given addr (e.g.
+ * 0x8000), do the mapped bank / code bytes vary across the run? If yes, a shard
+ * compiled from one snapshot would run stale code under a different bank live —
+ * the bank-alias hypothesis (SLJIT.md §8.5). Env-gated by SMS_MISSBANK so it is
+ * inert in normal runs; never arm-then-attach (PRINCIPLES #17). */
+typedef struct { uint64_t frame; uint16_t addr; uint8_t b0,b1,b2; uint32_t crc; } MissBankEv;
+#define MB_RING 8192
+static MissBankEv g_mb_ring[MB_RING];
+static uint32_t   g_mb_pos;
+static int        g_mb_on = -1;
+/* per-entry-addr interpreter cycle tally (only the hybrid/interp path, NOT shards),
+ * so the dump shows which dispatch-miss routines actually dominate interp cycles —
+ * the dominant-class triage signal for which emitter bucket to widen next. */
+static uint64_t   g_interp_cyc[0x10000];
+static void mb_interp(uint16_t addr, uint64_t cyc){ if (g_mb_on > 0) g_interp_cyc[addr] += cyc; }
+/* per-addr Tier-2 shard hit (ran native) vs miss (fell to interp) tally — shows whether
+ * a published shard is actually being USED live, or skipped (e.g. code-CRC mismatch). */
+static uint32_t   g_shard_hit[0x10000], g_shard_miss[0x10000];
+static void mb_shard(uint16_t addr, int hit){ if (g_mb_on > 0){ if (hit) g_shard_hit[addr]++; else g_shard_miss[addr]++; } }
+static uint32_t mb_code_crc(uint16_t addr){
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 256; i++){ h ^= sms_read8((uint16_t)(addr + i)); h *= 16777619u; }
+    return h;
+}
+static void mb_record(uint16_t addr){
+    if (g_mb_on < 0) g_mb_on = getenv("SMS_MISSBANK") ? 1 : 0;
+    if (!g_mb_on) return;
+    MissBankEv *e = &g_mb_ring[g_mb_pos & (MB_RING - 1)];
+    e->frame = g_frame; e->addr = addr;
+    e->b0 = (uint8_t)g_bank[0]; e->b1 = (uint8_t)g_bank[1]; e->b2 = (uint8_t)g_bank[2];
+    e->crc = mb_code_crc(addr);
+    g_mb_pos++;
+}
+static void mb_dump(void){
+    if (g_mb_on <= 0) return;
+    uint32_t n = g_mb_pos < MB_RING ? g_mb_pos : MB_RING;
+    const char *want = getenv("SMS_MISSBANK");
+    long want_addr = (want && want[0] && want[0] != '1') ? strtol(want, NULL, 16) : -1;
+    fprintf(stderr, "[missbank] %u events recorded (ring cap %u)\n", g_mb_pos, MB_RING);
+    /* one summary line per distinct addr: total hits + how many distinct
+     * (b0,b1,b2,crc) signatures it showed. distinct_sig > 1 => the code/bank at
+     * that miss target varies across the run (bank-alias risk for a shard). */
+    for (uint32_t i = 0; i < n; i++){
+        uint16_t addr = g_mb_ring[i].addr;
+        int first = 1;
+        for (uint32_t p = 0; p < i; p++) if (g_mb_ring[p].addr == addr){ first = 0; break; }
+        if (!first) continue;
+        uint32_t hits = 0, distinct = 0;
+        for (uint32_t j = 0; j < n; j++){
+            MissBankEv *ej = &g_mb_ring[j];
+            if (ej->addr != addr) continue;
+            hits++;
+            int seen = 0;
+            for (uint32_t k = 0; k < j; k++){
+                MissBankEv *ek = &g_mb_ring[k];
+                if (ek->addr == addr && ek->b0==ej->b0 && ek->b1==ej->b1 &&
+                    ek->b2==ej->b2 && ek->crc==ej->crc){ seen = 1; break; }
+            }
+            if (!seen) distinct++;
+        }
+        fprintf(stderr, "[missbank] addr=%04X hits=%u distinct_sig=%u\n", addr, hits, distinct);
+    }
+    /* top interp-cycle consumers: which dispatch-miss routines still run on the
+     * interpreter and how much they cost (the dominant-class signal for coverage). */
+    fprintf(stderr, "[missbank] top interp-cycle consumers (addr: cyc):\n");
+    for (int rank = 0; rank < 12; rank++){
+        uint32_t best = 0x10000; uint64_t bestc = 0;
+        for (uint32_t a = 0; a < 0x10000; a++)
+            if (g_interp_cyc[a] > bestc){ bestc = g_interp_cyc[a]; best = a; }
+        if (best == 0x10000) break;
+        fprintf(stderr, "  %04X: %llu  (shard hit=%u miss=%u)\n", best, (unsigned long long)bestc,
+                g_shard_hit[best], g_shard_miss[best]);
+        g_interp_cyc[best] = 0;                /* consume so the next rank is the next-largest */
+    }
+    if (want_addr >= 0){
+        fprintf(stderr, "[missbank] chronological for %04lX (frame: b0/b1/b2 crc):\n", want_addr);
+        for (uint32_t i = 0; i < n; i++){
+            MissBankEv *e = &g_mb_ring[i];
+            if (e->addr != (uint16_t)want_addr) continue;
+            fprintf(stderr, "  f=%llu %02X/%02X/%02X %08X\n",
+                    (unsigned long long)e->frame, e->b0, e->b1, e->b2, e->crc);
+        }
+    }
+}
+
 /* ---- always-on VDP register/CRAM write ring (raster-effect probe) ----
  * Every VDP register or CRAM write is recorded with the scanline it occurred
  * on (PRINCIPLES #17: query the ring, never arm-then-probe). At the dump frame
@@ -868,6 +957,7 @@ static const Bus g_live_bus = { live_r8, live_w8, live_in, live_out, live_call,
 #endif
 
 void sms_dispatch_miss(uint16_t addr){
+    mb_record(addr);                 /* always-on bank-alias probe (env-gated dump) */
 #ifdef SMS_HAVE_JIT
     /* Tier 2: if a trusted shard exists, run it natively and return. Otherwise
      * enqueue an async compile request (non-blocking, deduped — the worker thread
@@ -875,7 +965,8 @@ void sms_dispatch_miss(uint16_t addr){
      * time. NEVER blocks the game thread (SLJIT.md §2). */
     {
         ShardFn _sh = sms_jit_lookup(addr);
-        if (_sh){ _sh(&g_z80, &g_live_bus); return; }
+        if (_sh){ mb_shard(addr, 1); _sh(&g_z80, &g_live_bus); return; }
+        mb_shard(addr, 0);
         sms_jit_request(addr);
     }
 #endif
@@ -913,7 +1004,9 @@ void sms_dispatch_miss(uint16_t addr){
     }
 
     /* Robust fallback: interpret the routine to completion with live banking. */
+    uint64_t _c0 = g_z80.cyc;
     hybrid_interpret(addr);
+    mb_interp(addr, g_z80.cyc - _c0);
 }
 
 /* ====================== lifecycle ====================== */
@@ -988,6 +1081,7 @@ void glue_run(void){
         /* If we get here the reset routine RETurned (unusual) - just stop. */
     }
     sms_jit_shutdown();
+    mb_dump();                           /* bank-alias probe summary (env-gated) */
     g_running = false;
     fprintf(stderr, "[timing] frames=%llu irq_taken=%llu (reentrant=%llu) "
             "irq/frame=%.2f sync_maxdepth=%d\n",

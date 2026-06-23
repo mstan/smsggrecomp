@@ -15,6 +15,10 @@
 long z80h_inc8(Z80State *s, long v){ return (long)z80_inc8(s, (uint8_t)v); }
 long z80h_dec8(Z80State *s, long v){ return (long)z80_dec8(s, (uint8_t)v); }
 
+/* INC/DEC (HL): read-modify-write the byte at HL through the bus (flags as INC/DEC r). */
+void z80h_inc_hlm(Z80State *s, const Bus *b){ uint16_t a=z80_hl(s); b->write8(b->ctx,a,z80_inc8(s,b->read8(b->ctx,a))); }
+void z80h_dec_hlm(Z80State *s, const Bus *b){ uint16_t a=z80_hl(s); b->write8(b->ctx,a,z80_dec8(s,b->read8(b->ctx,a))); }
+
 /* 8-bit ALU on the accumulator: read A from s, compute, write A (+flags) back.
  * CP writes flags only. Indexed by the Z80 ALU group (y field 0..7). */
 void z80h_add(Z80State *s, long v){ s->a = z80_add8(s, s->a, (uint8_t)v, 0); }
@@ -31,6 +35,30 @@ void z80h_rlca(Z80State *s){ z80_rlca(s); }
 void z80h_rrca(Z80State *s){ z80_rrca(s); }
 void z80h_rla (Z80State *s){ z80_rla(s); }
 void z80h_rra (Z80State *s){ z80_rra(s); }
+
+static uint8_t *regp(Z80State *s, long i);   /* defined below (8-bit reg index -> ptr) */
+/* CB-prefixed op (rotate/shift, BIT, RES, SET) on register or (HL). `cb` is the byte
+ * after the CB prefix; reg index = cb&7 (6 = (HL), via the bus). All flag behavior comes
+ * from z80_ops.h so it matches the static path. BIT is read-only; the rest write back. */
+void z80h_cb(Z80State *s, const Bus *b, long cb_byte){
+    uint8_t cb = (uint8_t)cb_byte; int reg = cb & 7;
+    uint16_t a = z80_hl(s);
+    uint8_t v = (reg == 6) ? b->read8(b->ctx, a) : *regp(s, reg);
+    uint8_t res = v; int wb = 1;
+    if (cb < 0x40){
+        switch ((cb>>3)&7){
+            case 0: res=z80_rlc(s,v); break; case 1: res=z80_rrc(s,v); break;
+            case 2: res=z80_rl (s,v); break; case 3: res=z80_rr (s,v); break;
+            case 4: res=z80_sla(s,v); break; case 5: res=z80_sra(s,v); break;
+            case 6: res=z80_sll(s,v); break; default: res=z80_srl(s,v); break;
+        }
+    } else if (cb < 0x80){                                   /* BIT n,r — read-only */
+        uint8_t xy = (reg == 6) ? (uint8_t)(s->wz >> 8) : v; /* (HL): X/Y from WZ high */
+        z80_bit(s, (cb>>3)&7, v, xy); wb = 0;
+    } else if (cb < 0xC0){ res = (uint8_t)(v & ~(1u << ((cb>>3)&7))); } /* RES n,r */
+    else                 { res = (uint8_t)(v |  (1u << ((cb>>3)&7))); } /* SET n,r */
+    if (wb){ if (reg == 6) b->write8(b->ctx, a, res); else *regp(s, reg) = res; }
+}
 
 /* ---- memory + 16-bit + stack (the bus carries all guest memory access) ----
  * "Fat" helpers: addressing + bus access live in C so the emitter stays simple
@@ -98,6 +126,23 @@ long z80h_call(Z80State *s, const Bus *b, long target_ret){
     b->write8(b->ctx, (uint16_t)(s->sp + 1), (uint8_t)(ret >> 8));
     b->call(b->ctx, s, target);
     return (int16_t)(s->sp - csp) > 0;   /* nonzero => callee returned past us */
+}
+
+/* JP (HL): computed TAIL dispatch (the jump-table dispatcher idiom). No return is
+ * pushed — control transfers to HL and the eventual RET unwinds to OUR caller, so
+ * the shard re-enters the dispatcher at HL and then returns. If a particular site
+ * were actually a computed CALL (push <ret>; jp (hl)), the target would return into
+ * THIS function instead of past it — the off-thread validation gate catches that
+ * divergence and declines the shard, so emitting the tail form is precision-safe. */
+void z80h_jp_hl(Z80State *s, const Bus *b){
+    b->call(b->ctx, s, (uint16_t)((s->h << 8) | s->l));
+}
+
+/* JP/JR nn whose static target lies OUTSIDE this shard's function window: a tail jump
+ * to another function. Same tail semantics as z80h_jp_hl — dispatch to the target and
+ * return (the eventual RET unwinds to our caller). Precision-safe via the same gate. */
+void z80h_jp_to(Z80State *s, const Bus *b, long target){
+    b->call(b->ctx, s, (uint16_t)target);
 }
 
 #endif /* SMS_HAVE_JIT */
