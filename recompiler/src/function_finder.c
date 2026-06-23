@@ -145,6 +145,27 @@ static void bank_set(BankState *bs, int slot){
     if (bs->a_known >= 0){ bs->slot[slot] = bs->a_known; bs->known[slot] = true; }
     else                   bs->known[slot] = false;       /* runtime-determined: defer */
 }
+/* Pager registry: functions whose straight-line effect (entered with A=bank) is
+ * one or more Sega mapper writes `ld ($FFFD/E/F),a`, mapping a value into a slot.
+ * The bank-multiplexed dispatch idiom `ld a,bank ; call pager ; call $8xxx` sets
+ * the slot bank inside the helper, so bank state must follow the call to resolve
+ * which (addr,bank) variant the subsequent slot call reaches.
+ *
+ * The written value is modeled exactly as a function of the incoming A: either a
+ * CONSTANT (A was reloaded, e.g. rst $08 does slot0<-0) or AFFINE A+delta (e.g.
+ * rst $10 does slot1<-A+1, slot2<-A+2; $2078 does slot2<-A). A pager can write
+ * multiple slots. Mis-modeling this (assuming slot<-A verbatim) seeds wrong-bank
+ * variants -> miscompiles, so the transform is tracked precisely. */
+typedef enum { PG_CONST, PG_AFFINE } PagerMode;
+static struct {
+    uint16_t addr; int n;
+    struct { int slot; PagerMode mode; int val; } eff[3];   /* val = const, or affine delta */
+} g_pager[64];
+static int g_pager_n;
+static int pager_index(uint16_t addr){
+    for (int i=0;i<g_pager_n;i++) if (g_pager[i].addr==addr) return i;
+    return -1;
+}
 void bankstate_step(BankState *bs, const TracedInsn *cur, const TracedInsn *prev){
     (void)prev;
     const Z80Insn *in = &cur->insn;
@@ -170,6 +191,25 @@ void bankstate_step(BankState *bs, const TracedInsn *cur, const TracedInsn *prev
     } else if (insn_clobbers_a(in)){
         bs->a_known = -1;
     }
+    /* `call pager` applies the pager's mapper writes (idiom: `ld a,bank ; call
+     * pager ; call $8xxx`). Only an UNCONDITIONAL call is certain to run them; a
+     * conditional call may be skipped, leaving the banks unchanged. A CONST write
+     * applies regardless of A; an AFFINE write needs A statically known. */
+    if (in->cf==Z80_CF_CALL && in->has_target){
+        int pi = pager_index(in->target);
+        if (pi >= 0){
+            for (int e=0;e<g_pager[pi].n;e++){
+                int sl=g_pager[pi].eff[e].slot;
+                if (g_pager[pi].eff[e].mode==PG_CONST){
+                    bs->slot[sl]=g_pager[pi].eff[e].val & 0xFF; bs->known[sl]=true;
+                } else if (bs->a_known>=0){
+                    bs->slot[sl]=(bs->a_known + g_pager[pi].eff[e].val) & 0xFF; bs->known[sl]=true;
+                } else {
+                    bs->known[sl]=false;     /* affine but A unknown: defer */
+                }
+            }
+        }
+    }
 }
 bool bankstate_target(const BankState *bs, uint16_t T, int *out_bank){
     if (T >= 0xC000) return false;           /* RAM, not code */
@@ -184,6 +224,51 @@ bool bankstate_target(const BankState *bs, uint16_t T, int *out_bank){
 static const Z80Insn *tr_insn_at(const TraceResult *t, uint16_t a){
     for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==a) return &t->insns[i].insn;
     return NULL;
+}
+
+/* Classify `start` as a pager by symbolically executing its straight-line entry
+ * path, tracking A as either CONST c or AFFINE (incoming + delta), and recording
+ * every `ld ($FFFD/E/F),a` as a slot write of the current A expression. Mapper:
+ * FFFD->slot0, FFFE->slot1, FFFF->slot2; $FFFC (RAM control) is ignored. Walks
+ * fall-through only and stops the moment A becomes unmodelable (an unmodeled
+ * A-clobber) or control flow leaves — so every recorded effect is exact. */
+static void detect_pager(const TraceResult *tr, uint16_t start){
+    uint16_t a = start;
+    bool is_const=false; int cval=0, delta=0;        /* A = is_const? cval : (incoming+delta) */
+    struct { int slot; PagerMode mode; int val; } eff[3]; int neff=0;
+    for (int guard=0; guard<32 && neff<3; guard++){
+        const Z80Insn *in = tr_insn_at(tr, a);
+        if (!in || in->prefix!=Z80_PFX_NONE) break;
+        uint8_t op=in->opcode;
+        if (op==0x32){                                       /* ld (nn),a (A preserved) */
+            int slot = in->imm==0xFFFD?0 : in->imm==0xFFFE?1 : in->imm==0xFFFF?2 : -1;
+            if (slot>=0){
+                eff[neff].slot=slot;
+                eff[neff].mode=is_const?PG_CONST:PG_AFFINE;
+                eff[neff].val =is_const?(cval&0xFF):(delta&0xFF);
+                neff++;
+            }
+        }
+        else if (op==0x3E){ is_const=true; cval=(uint8_t)in->imm; }   /* ld a,n   */
+        else if (op==0x3C){ if(is_const)cval++; else delta++; }       /* inc a    */
+        else if (op==0x3D){ if(is_const)cval--; else delta--; }       /* dec a    */
+        else if (op==0xAF||op==0x97){ is_const=true; cval=0; }        /* xor a / sub a */
+        else if (op==0xA7||op==0xB7){ /* and a / or a: A value unchanged */ }
+        else {
+            if (insn_clobbers_a(in)) break;                  /* A unmodelable from here */
+            if (in->cf != Z80_CF_NONE) break;                /* left the fall-through path */
+        }
+        a = (uint16_t)(a + in->length);
+    }
+    if (neff>0 && pager_index(start)<0 && g_pager_n < (int)(sizeof g_pager/sizeof g_pager[0])){
+        g_pager[g_pager_n].addr=start; g_pager[g_pager_n].n=neff;
+        for (int e=0;e<neff;e++){
+            g_pager[g_pager_n].eff[e].slot=eff[e].slot;
+            g_pager[g_pager_n].eff[e].mode=eff[e].mode;
+            g_pager[g_pager_n].eff[e].val =eff[e].val;
+        }
+        g_pager_n++;
+    }
 }
 
 /* Does `in` modify any part of register pair `preg` (0=BC 1=DE 2=HL 3=AF 4=IX
@@ -737,6 +822,7 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
     int vec_seeded = 0;
     int isl_seeded = 0;
     g_disp_slot_n = 0;          /* dispatch slots accumulate monotonically below */
+    g_pager_n = 0;              /* pager registry accumulates monotonically below */
     bool changed = true;
     int guard = 0;
     while (changed && guard++ < 64){
@@ -758,6 +844,7 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
             if (in_blacklist(blacklist,blacklist_count,start)) continue;
             TraceResult tr;
             trace_function(rom, start, bank, entries, n, &tr);
+            detect_pager(&tr, start);   /* register A->slot mapper helpers for call propagation */
             /* Track all three slot banks via the contiguous
              * `ld a,#imm ; ld ($FFFD/$FFFE/$FFFF),a` idiom (linear address-order
              * approximation; the runtime dispatch-miss loop resolves anything we

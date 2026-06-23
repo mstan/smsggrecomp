@@ -286,6 +286,12 @@ static int cyc_base(const Z80Insn *in){
         case Z80_PFX_CB: { int z=in->opcode&7,x=in->opcode>>6; return (z==6)?(x==1?12:15):8; }
         case Z80_PFX_DDCB: case Z80_PFX_FDCB: return (in->opcode>>6)==1 ? 20 : 23;
         case Z80_PFX_DD: case Z80_PFX_FD:
+            /* LD (IX/IY+d),n (opcode 36) is 19 T-states, not base(10)+4+8=22:
+             * the immediate-store form's write phase is not extended the way
+             * the other indexed ops are, so the generic +8 displacement penalty
+             * over-charges it by 3. Every other DD/FD+disp op (ld r,(ix+d),
+             * ld (ix+d),r, ALU (ix+d)=19; inc/dec (ix+d)=23) is exact. */
+            if (in->opcode == 0x36) return 19;
             return base_cyc[in->opcode] + 4 + (in->uses_disp ? 8 : 0);
         case Z80_PFX_ED: return ed_cyc(in->opcode);
         default: return base_cyc[in->opcode];
@@ -297,7 +303,27 @@ static bool tr_has(uint16_t a){
     for (int i=0;i<G_TR->insn_count;i++) if (G_TR->insns[i].addr==a) return true;
     return false;
 }
+/* Distinct runtime banks for which an entry exists at address T (a -1/fixed
+ * entry maps to the slot's default bank). >1 means the address is bank-
+ * MULTIPLEXED: different code runs depending on the live slot bank. */
+static int target_runtime_bank_count(uint16_t T){
+    int rbs[64], n=0;
+    for (int i=0;i<G_FL->count;i++){
+        if (!G_FL->items[i].is_entry || G_FL->items[i].addr!=T) continue;
+        int b = G_FL->items[i].bank;
+        int rb = (b >= 0) ? b : (T >> 14);
+        bool dup=false; for (int e=0;e<n;e++) if (rbs[e]==rb){ dup=true; break; }
+        if (!dup && n < 64) rbs[n++]=rb;
+    }
+    return n;
+}
 static const char *name_for_target(uint16_t T){
+    /* A bank-multiplexed address must dispatch on the LIVE slot bank at runtime,
+     * not on the bank our static walk happened to infer at this site: the same
+     * call site can be reached with different banks, so a direct call to one
+     * variant would miscompile. Defer to call_by_address (which switches on
+     * sms_slot_bank) — still fully static, and correct for every invocation. */
+    if (target_runtime_bank_count(T) > 1) return NULL;
     /* Resolve under the call site's bank context first (so a banked call like
      * `ld ($FFFE),3 ; call $4006` binds func_4006_b3, not the bank-1 reading). */
     int idx = -1;
