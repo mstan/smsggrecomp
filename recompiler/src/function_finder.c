@@ -693,12 +693,49 @@ static int seed_vector_install(const SmsRom *rom, FuncList *fl, const TraceResul
     return 0;
 }
 
+/* A jp-island (trampoline) table: a maximal run of `C3 nn nn` (jp absolute)
+ * instructions. Hand-written dispatchers index it by base+i*3 and jp into it,
+ * and individual islands are also CALLed directly across banks. A run of many
+ * jp-absolute triples is an unmistakable signature (random data is ~1/256 per
+ * byte), and the `ld rr,imm` that points at it proves the table is referenced.
+ * Each island's jp-target is a function entry. The island bytes stay CODE (each
+ * is a valid jp), so they are NOT marked as data. Triggered on `ld rr,imm`. */
+#define JPISLAND_MIN 4
+static int seed_jp_island(const SmsRom *rom, FuncList *fl, uint16_t tbl,
+                          const BankState *bs, const uint16_t *bl, int bln){
+    if (tbl >= 0xC000) return 0;                          /* RAM: not a ROM table */
+    int tslot = tbl >> 14;
+    if (!bs->known[tslot]) return 0;                      /* table bank runtime-unknown */
+    int tbank = (tbl < 0x0400) ? 0 : bs->slot[tslot];
+    int n=0;                                              /* count the C3-triple run */
+    for (;; n++){
+        uint16_t ea=(uint16_t)(tbl + n*3);
+        if ((ea>>14)!=tslot) break;                       /* don't cross a slot boundary */
+        size_t off=rom_z80_to_offset(rom, ea, tbank);
+        if (off==SIZE_MAX || off+2>=rom->size) break;
+        if (rom_read_offset(rom,off)!=0xC3) break;
+    }
+    if (n < JPISLAND_MIN) return 0;
+    int seeded=0;
+    for (int e=0;e<n;e++){
+        size_t off=rom_z80_to_offset(rom, (uint16_t)(tbl+e*3), tbank);
+        uint16_t T=(uint16_t)(rom_read_offset(rom,off+1) | (rom_read_offset(rom,off+2)<<8));
+        if (T>=0xC000) continue;                          /* RAM target: not code */
+        if (in_blacklist(bl,bln,T)) continue;
+        int b;
+        if (!bankstate_target(bs,T,&b)) continue;         /* defer runtime-unknown bank */
+        if (funclist_find(fl,T,b)<0){ funclist_add(fl,T,b,NULL,FUNC_SRC_TABLE,true); seeded++; }
+    }
+    return seeded;
+}
+
 void ff_discover(const SmsRom *rom, FuncList *fl,
                  const uint16_t *blacklist, int blacklist_count){
     /* Iterate to a fixpoint: trace every known entry, harvest CALL targets as
      * new entries, repeat until no new entries appear. */
     int jt_seeded = 0;
     int vec_seeded = 0;
+    int isl_seeded = 0;
     g_disp_slot_n = 0;          /* dispatch slots accumulate monotonically below */
     bool changed = true;
     int guard = 0;
@@ -751,6 +788,13 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                     int s = seed_vector_install(rom, fl, &tr, k, &bs, blacklist, blacklist_count);
                     if (s>0){ vec_seeded += s; changed=true; }
                 }
+                /* jp-island table: `ld rr,imm` pointing at a run of jp-absolute
+                 * triples -> seed every island's jp-target as an entry. */
+                if (in->prefix==Z80_PFX_NONE && in->imm_bits==16 &&
+                    (in->opcode==0x21||in->opcode==0x11||in->opcode==0x01)){
+                    int s = seed_jp_island(rom, fl, (uint16_t)in->imm, &bs, blacklist, blacklist_count);
+                    if (s>0){ isl_seeded += s; changed=true; }
+                }
                 bool is_call = (in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND);
                 bool is_tailjump = (in->cf==Z80_CF_JUMP && in->has_target &&
                                     !trace_is_label(&tr,in->target) &&
@@ -776,4 +820,6 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
     if (g_disp_slot_n || vec_seeded)
         printf("[SmsRecomp] RAM dispatch vectors: %d slot(s), %d handler(s) seeded\n",
                g_disp_slot_n, vec_seeded);
+    if (isl_seeded)
+        printf("[SmsRecomp] jp-island tables: %d target(s) seeded\n", isl_seeded);
 }
