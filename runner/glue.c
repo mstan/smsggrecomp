@@ -20,7 +20,6 @@
 #include "external/superzazu/z80.h"
 #include "png_write.h"
 #include "audio/sn76489.h"
-#include "jit/shard_jit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,29 +103,25 @@ static uint64_t fnv1a64(const void *buf, size_t n){
     return h;
 }
 
-/* ---- always-on dispatch-miss bank/code ring (Tier-2 bank-alias probe) ----
+/* ---- always-on dispatch-miss bank/code ring (bank-alias probe) -----------
  * Every sms_dispatch_miss() records (frame, addr, banks, live-code CRC) into a
  * ring from frame 0 onward. The CRC is FNV over a 256-byte window read through
  * the LIVE bus at the miss target, so it captures exactly which banked bytes the
  * CPU would execute there. Query (dump) at run end to ask: for a given addr (e.g.
- * 0x8000), do the mapped bank / code bytes vary across the run? If yes, a shard
- * compiled from one snapshot would run stale code under a different bank live —
- * the bank-alias hypothesis (SLJIT.md §8.5). Env-gated by SMS_MISSBANK so it is
- * inert in normal runs; never arm-then-attach (PRINCIPLES #17). */
+ * 0x8000), do the mapped bank / code bytes vary across the run? A varying
+ * signature means the same Z80 address hosts different banked functions — the
+ * static finder must disambiguate them by bank (PRINCIPLES #16). Env-gated by
+ * SMS_MISSBANK so it is inert in normal runs; never arm-then-attach (PRINCIPLES #17). */
 typedef struct { uint64_t frame; uint16_t addr; uint8_t b0,b1,b2; uint32_t crc; } MissBankEv;
 #define MB_RING 8192
 static MissBankEv g_mb_ring[MB_RING];
 static uint32_t   g_mb_pos;
 static int        g_mb_on = -1;
-/* per-entry-addr interpreter cycle tally (only the hybrid/interp path, NOT shards),
- * so the dump shows which dispatch-miss routines actually dominate interp cycles —
- * the dominant-class triage signal for which emitter bucket to widen next. */
+/* per-entry-addr interpreter cycle tally, so the dump shows which dispatch-miss
+ * routines actually dominate interp cycles — the dominant-class triage signal for
+ * which routines the static finder should resolve next. */
 static uint64_t   g_interp_cyc[0x10000];
 static void mb_interp(uint16_t addr, uint64_t cyc){ if (g_mb_on > 0) g_interp_cyc[addr] += cyc; }
-/* per-addr Tier-2 shard hit (ran native) vs miss (fell to interp) tally — shows whether
- * a published shard is actually being USED live, or skipped (e.g. code-CRC mismatch). */
-static uint32_t   g_shard_hit[0x10000], g_shard_miss[0x10000];
-static void mb_shard(uint16_t addr, int hit){ if (g_mb_on > 0){ if (hit) g_shard_hit[addr]++; else g_shard_miss[addr]++; } }
 static uint32_t mb_code_crc(uint16_t addr){
     uint32_t h = 2166136261u;
     for (int i = 0; i < 256; i++){ h ^= sms_read8((uint16_t)(addr + i)); h *= 16777619u; }
@@ -194,7 +189,7 @@ static void mb_dump(void){
     fprintf(stderr, "[missbank] %u events recorded (ring cap %u)\n", g_mb_pos, MB_RING);
     /* one summary line per distinct addr: total hits + how many distinct
      * (b0,b1,b2,crc) signatures it showed. distinct_sig > 1 => the code/bank at
-     * that miss target varies across the run (bank-alias risk for a shard). */
+     * that miss target varies across the run => bank-multiplexed code at one addr). */
     for (uint32_t i = 0; i < n; i++){
         uint16_t addr = g_mb_ring[i].addr;
         int first = 1;
@@ -236,8 +231,7 @@ static void mb_dump(void){
         for (uint32_t a = 0; a < 0x10000; a++)
             if (g_interp_cyc[a] > bestc){ bestc = g_interp_cyc[a]; best = a; }
         if (best == 0x10000) break;
-        fprintf(stderr, "  %04X: %llu  (shard hit=%u miss=%u)\n", best, (unsigned long long)bestc,
-                g_shard_hit[best], g_shard_miss[best]);
+        fprintf(stderr, "  %04X: %llu\n", best, (unsigned long long)bestc);
         g_interp_cyc[best] = 0;                /* consume so the next rank is the next-largest */
     }
     if (want_addr >= 0){
@@ -415,22 +409,6 @@ static void frame_completed(void){
     g_frame++;
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
-#ifdef SMS_HAVE_JIT
-    /* live Tier-2 coverage: shards published (monotonic up = coverage growing) and
-     * the interp fraction over the last window (drops as shards take over). */
-    { static uint64_t lf, lh, lt;
-      if (g_frame - lf >= 120){
-          uint64_t dh = g_hybrid_cyc - lh, dt = g_z80.cyc - lt;
-          fprintf(stderr, "[jit-cov] frame=%llu shards=%llu req=%llu declined=%llu | "
-                  "interp last~2s=%.1f%% total=%.1f%%\n",
-                  (unsigned long long)g_frame, (unsigned long long)sms_jit_published(),
-                  (unsigned long long)sms_jit_requested(), (unsigned long long)sms_jit_declined(),
-                  dt ? 100.0*(double)dh/(double)dt : 0.0,
-                  g_z80.cyc ? 100.0*(double)g_hybrid_cyc/(double)g_z80.cyc : 0.0);
-          fflush(stderr);
-          lf=g_frame; lh=g_hybrid_cyc; lt=g_z80.cyc;
-      } }
-#endif
     if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
     if (g_audio_sink){
         /* Drain this frame's PSG output to the sink (interleaved stereo). The
@@ -1026,39 +1004,9 @@ void glue_diff_init(void){
 }
 
 /* ====================== dispatch miss ====================== */
-#ifdef SMS_HAVE_JIT
-/* Live bus the shard ABI runs against on the game thread (the worker validates
- * shards against a sandbox bus over a snapshot instead). Thin wrappers over the
- * runner's global bus; ctx unused. */
-static uint8_t live_r8 (void *c, uint16_t a){ (void)c; return sms_read8(a); }
-static void    live_w8 (void *c, uint16_t a, uint8_t v){ (void)c; sms_write8(a, v); }
-static uint8_t live_in (void *c, uint8_t p){ (void)c; return sms_io_in(p); }
-static void    live_out(void *c, uint8_t p, uint8_t v){ (void)c; sms_io_out(p, v); }
-/* shard CALL on the game thread: the live shard runs on &g_z80, so the callee runs
- * on the live dispatcher (Tier 1/2/3) over the same global state. */
-static void    live_call(void *c, Z80State *s, uint16_t t){ (void)c; (void)s; call_by_address(t); }
-/* shard per-instruction sync on the game thread: advance the VDP + accept a pending
- * IRQ exactly as the static path's sms_tick does (s == &g_z80). */
-static void    live_sync(Z80State *s){ (void)s; sms_sync(); }
-static const Bus g_live_bus = { live_r8, live_w8, live_in, live_out, live_call,
-                                &g_sync_deadline, live_sync, NULL };
-#endif
-
 void sms_dispatch_miss(uint16_t addr){
     mb_record(addr);                 /* always-on bank-alias probe (env-gated dump) */
     manifest_record(addr);           /* always-on profile-guided discovery manifest */
-#ifdef SMS_HAVE_JIT
-    /* Tier 2: if a trusted shard exists, run it natively and return. Otherwise
-     * enqueue an async compile request (non-blocking, deduped — the worker thread
-     * does all compilation/validation) and fall through to the interpreter this
-     * time. NEVER blocks the game thread (SLJIT.md §2). */
-    {
-        ShardFn _sh = sms_jit_lookup(addr);
-        if (_sh){ mb_shard(addr, 1); _sh(&g_z80, &g_live_bus); return; }
-        mb_shard(addr, 0);
-        sms_jit_request(addr);
-    }
-#endif
     /* Log each newly-seen miss once - this is the static-analysis worklist
      * (PRINCIPLES #16): every address here is a computed target the finder
      * should ideally resolve statically. The hybrid below is the robust
@@ -1165,12 +1113,10 @@ void glue_run_interp(void){
 
 void glue_run(void){
     g_running = true;
-    sms_jit_init();                      /* start the Tier-2 shard worker (no-op unless -DSMS_HAVE_JIT) */
     if (setjmp(g_quit_env) == 0){
         call_by_address(0x0000);         /* reset entry; runs the game */
         /* If we get here the reset routine RETurned (unusual) - just stop. */
     }
-    sms_jit_shutdown();
     mb_dump();                           /* bank-alias probe summary (env-gated) */
     g_running = false;
     fprintf(stderr, "[timing] frames=%llu irq_taken=%llu (reentrant=%llu) "
