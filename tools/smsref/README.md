@@ -30,8 +30,14 @@ smsref is a confirmed independent oracle — headless, deterministic, one proces
 for all frames (<1 s vs ~1 min per Mesen launch).
 
 ## Status / next (per accuracy/SMSREF_PLAN.md)
-- [x] Phase A: headless state dump (VRAM/CRAM/Z80), validated.
-- [ ] Phase B: TCP/JSON server (persistent, queryable) — replace per-frame launches.
-- [ ] Phase C: chip_ring + synth_replay — replay identical PSG writes through our
-      sn76489 vs GPGX's psg.c (real period-0=0x400) → reopens the audio axis.
+- [x] Phase A: headless state dump (VRAM/CRAM/Z80), validated byte-identical.
+- [x] Phase B: TCP/JSON server (`--server PORT`) + `smsref_client.py`, validated.
+- [~] Phase C: chip_ring (`runner --psg-log` + `tools/oracle/psg_analyze.py`) +
+      `synth_ours` (replay chip_ring → WAV through our SN76489). **Found:** Sonic
+      writes tone period-0 300× → our clamp-to-1 is a real divergence vs GPGX's
+      0x400 (Axis-5 Risk #1 LIVE). REMAINING: `synth_gpgx` (GPGX psg.c → ref.wav)
+      for the independent WAV diff — blocked on GPGX's `snd`/blip coupling
+      (psg.c writes `snd.blips[0]`, `snd` lives in sound.c; needs a minimal sound
+      shim or link a trimmed sound.c). Recipe: clocks = z80_cyc*15, PSG_DISCRETE,
+      blip @ clock=MCLOCK_NTSC(53693175)→native rate; drain via blip_read_samples.
 </content>

@@ -279,10 +279,14 @@ exactly (`sn76489.c:171-173`). Output: `--audio-wav` S16/stereo @ native rate
   pivots to **Cycle (Axis 2)**, where the Mesen oracle IS accurately diffable.
   (Re-openable via the headless GPGX synthesis-isolation oracle if a precise
   chip-math diff is ever wanted.)
-- [ ] **Risk #1 — period-0 handling.** `sn76489.c:112,90` clamps tone period 0
-  → 1; real SN76489 treats written 0 as **0x400**. Audible if any driver writes
-  period 0. **Highest-risk synthesis defect.** Cross-ref: smspower PSG /
-  Maxim's SN76489 notes; oracle: Mesen WAV on a period-0 test.
+- [x] **Risk #1 — period-0 = CONFIRMED LIVE BUG (2026-06-28).** `sn76489.c:112,90`
+  clamps tone period 0 → 1 (max freq); real discrete SN76489 uses **0x400**
+  (lowest freq). DUAL-VALIDATED: cross-ref GPGX `psg.c` PSG_DISCRETE
+  `zeroFreqInc=0x400`; runtime — the chip_ring (`--psg-log` + `psg_analyze.py`)
+  shows Sonic 1 SMS writes tone period 0 **300×** (all 3 tone channels). So this
+  is a real hardware divergence, NOT moot. **Fix (deferred, behavior change):**
+  `sn76489.c` period 0 → reload 0x400, not 1. Audibility quantified by the
+  GPGX-ref synth_replay (remaining).
 - [ ] Risk #2 — volume curve is an ideal 2 dB/step table (`:62-65`); real chip
   + other emus deviate per-step → absolute amplitude won't be sample-exact.
 - [ ] Risk #3 — output LPF is a clownmdemu Mega-Drive IIR (`:129-139`), not an
