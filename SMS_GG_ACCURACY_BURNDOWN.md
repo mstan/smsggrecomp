@@ -13,6 +13,15 @@ Stomping-ground title: **Sonic the Hedgehog (SMS)** — the byte-exact,
 
 ## ⚠️ LESSONS (append-only, dated)
 
+- **2026-06-28 — Validate which oracle BRANCH applies before "fixing".** The
+  period-0 "bug" (our clamp-to-1 vs GPGX `psg.c` 0x400) was nearly shipped — but
+  GPGX uses 0x400 ONLY for SG-1000; for SMS/GG it uses the integrated 0x1 ==
+  our clamp. A source value existing (`0x400` in psg.c) is NOT the spec for our
+  platform; check which path the oracle takes for OUR system (`sound.c` picks by
+  `system_hw`). Shipping it would have been a regression. Confirmed by the GG
+  audio diff (ALIGNED with integrated). Output/oracle-applicability check before
+  any code change.
+
 - **2026-06-28 — Self-agreement is not GREEN.** `sonic_audio.wav` (static
   recomp) matching `sonic_interp.wav` (our superzazu interp path) proves
   *backend equivalence*, NOT correctness — both run the same clean-room
@@ -286,14 +295,16 @@ exactly (`sn76489.c:171-173`). Output: `--audio-wav` S16/stereo @ native rate
   identical to an independent accurate emulator. (waveform NCC ~0 expected —
   independent synths.) The headless GPGX audio is the reference Mesen couldn't
   give.
-- [x] **Risk #1 — period-0: real divergence, INAUDIBLE for Sonic 1 (2026-06-28).**
-  `sn76489.c:112,90` clamps period 0→1; HW/GPGX discrete uses 0x400. The
-  chip_ring shows Sonic writes period 0 **300×** — but `psg_analyze.py` (with
-  volume tracking) shows **all 300 are at volume 15 (channel muted)** → the game
-  only sets period 0 while silencing, so it's INAUDIBLE here (explains the
-  ALIGNED system-audio result). Still worth FIXING for correctness / other
-  titles (period 0→0x400; deferred behavior change). The 5.4¢/0.976 residual is
-  volume-curve + LFSR, not period-0.
+- [x] **Risk #1 — RESOLVED: clamp-to-1 is CORRECT for SMS/GG, NOT a bug
+  (2026-06-28).** Reversed an earlier wrong conclusion. GPGX `sound.c:357` uses
+  `PSG_DISCRETE` (period 0→0x400) **only for SG-1000**; for SMS/SMS2/GG it uses
+  `PSG_INTEGRATED` (period 0→**0x1** == our clamp-to-1). So `sn76489.c`'s
+  clamp-to-1 matches the integrated SMS/GG hardware GPGX models. **Empirically
+  confirmed:** Sonic Blast GG writes period 0 at AUDIBLE volume (7×) yet the
+  recomp audio is ALIGNED with GPGX (integrated) — had we shipped 0x400 those
+  events would diverge. **Do NOT change.** (`psg_analyze.py` volume-aware; the
+  0x400 "fix" was a would-be regression caught by checking which PSG variant
+  GPGX uses for our platform, not just that 0x400 exists in its source.)
 - [ ] Risk #2 — volume curve is an ideal 2 dB/step table (`:62-65`); real chip
   + other emus deviate per-step → absolute amplitude won't be sample-exact.
 - [ ] Risk #3 — output LPF is a clownmdemu Mega-Drive IIR (`:129-139`), not an
@@ -375,6 +386,17 @@ sim loop.
   jitter; RMS(diff)/RMS = 1.036 = √(2·(1−0.46))). Self-agreement → not GREEN,
   but it sets the bit-exact ceiling: drift-tolerant is mandatory. See
   `accuracy/audio.md`.
+
+### 2026-06-28 — Cross-title: Sonic Blast GG audio + period-0 decision
+- Sonic Blast GG (recomp, 100% static, 0 misses) audio vs GPGX (smsref `--wav`,
+  forced GG): **ALIGNED** — env_corr 0.90, onset 87.3% (234/268), pitch median
+  4.2¢. Recomp GG audio structurally correct.
+- **period-0 fix NOT shipped** (would be a regression): SMS/GG integrated PSG =
+  0x1 = clamp-to-1 (correct); 0x400 is SG-1000-only. Sonic Blast GG writes
+  period-0 at audible volume yet stays ALIGNED with GPGX → confirms clamp-to-1.
+- smsref fix: GPGX detects system by the LAST 3 filename chars (`.gg`→`.GG`, GG
+  at [1..2]); `load_archive` now passes that (was passing `dot+1`, so a 1MB
+  `.gg` mis-ID'd as Mega Drive → empty VRAM/silent). Now `system_hw=0x40` (GG).
 
 ### 2026-06-28 — Measurement sweep (all axes) → divergence burndown
 Measurement-only (no behavior change): dumped recomp CPU/PSG/VRAM/CRAM at

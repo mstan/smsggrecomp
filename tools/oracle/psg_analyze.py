@@ -47,10 +47,16 @@ def main():
         print(f"    of which at AUDIBLE volume (<15): {len(audible)}")
         for cyc, ch, v in period0_events[:6]:
             print(f"    cyc={cyc} ch={ch} vol={v}{' (AUDIBLE)' if v<15 else ' (silent)'}")
+        # NOTE: the correct period-0 reload is PLATFORM-dependent. GPGX
+        # (sound.c) uses PSG_INTEGRATED (period 0 -> 0x1 == clamp-to-1) for SMS /
+        # SMS2 / GG, and PSG_DISCRETE (0x400) ONLY for SG-1000. So for our SMS/GG
+        # targets clamp-to-1 is CORRECT; 0x400 would be wrong.
         if audible:
-            print("  => period-0 written at AUDIBLE volume: clamp-to-1 (HW=0x400) is an AUDIBLE bug")
+            print("  => period-0 at AUDIBLE volume — exercises the reload value.")
+            print("     SMS/GG integrated PSG => correct = 0x1 (== our clamp-to-1). Only SG-1000")
+            print("     discrete uses 0x400. Confirm vs the GPGX audio diff (ALIGNED => clamp ok).")
         else:
-            print("  => period-0 ONLY while channel muted (vol=15): real divergence but INAUDIBLE here")
+            print("  => period-0 only while channel muted (vol=15): inaudible regardless of reload.")
     else:
         print("  => period-0 NEVER written: the clamp-to-1 vs 0x400 gap is MOOT for this title")
     # lowest periods (highest pitch) — where clamp behavior matters most

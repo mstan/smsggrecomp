@@ -37,8 +37,11 @@ int load_archive(char *filename, unsigned char *buffer, int maxsize, char *exten
     if (!f) { fprintf(stderr, "smsref: cannot open %s\n", filename); return 0; }
     int n = (int)fread(buffer, 1, maxsize, f);
     if (extension) {
-        const char *dot = strrchr(filename, '.');
-        if (dot && strlen(dot + 1) < 4) strcpy(extension, dot + 1);
+        /* GPGX detects by the LAST 3 filename chars: SMS at [0..2]=="SMS",
+         * GG at [1..2]=="GG" (loadrom.c). ".gg" -> ".GG" matches GG. */
+        size_t L = strlen(filename);
+        if (L >= 3) { memcpy(extension, filename + L - 3, 3); extension[3] = 0; }
+        else extension[0] = 0;
     }
     fclose(f);
     return n;
