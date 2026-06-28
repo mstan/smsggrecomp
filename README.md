@@ -12,11 +12,14 @@ modeled by the runtime.
 
 > **Status: early (v0.0.2) — pre-release, expect bugs.** Two games are in
 > bring-up: **Sonic the Hedgehog (SMS)** and **Sonic Blast (Game Gear)**. Across
-> the title + attract-demo path exercised so far (~60s), both run with no
-> interpreter-fallback dispatch miss and render byte-exact (palette + system RAM)
-> to the vendored superzazu interpreter used as an oracle. Neither game has been
-> played end to end, so full-gameplay coverage is unverified. Other SMS/GG Sonic
-> titles are future targets.
+> the title + attract-demo path exercised so far (~40–60s), both run with no
+> interpreter-fallback dispatch miss (100% static) and have been validated
+> across **7 accuracy axes** against **two independent accurate emulators**
+> (Mesen 2 and Genesis Plus GX): VRAM/CRAM **byte-identical**, cycle timing
+> jitter-only with no net drift, and audio aligned. Neither game has been played
+> end to end, so full-gameplay coverage is unverified. See **[ACCURACY.md](ACCURACY.md)**
+> for the precise claims, evidence, how-to-reproduce, and what's outstanding.
+> Other SMS/GG Sonic titles are future targets.
 
 | Sonic the Hedgehog (SMS) | Sonic Blast (Game Gear) |
 |---|---|
