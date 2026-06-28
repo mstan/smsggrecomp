@@ -143,6 +143,9 @@ int main(int argc, char **argv){
     bool interp = false;       /* oracle: run the reference superzazu interpreter */
     const char *audio_wav = NULL;   /* dump PSG output to this WAV */
     bool mute = false;              /* suppress live SDL audio (window build) */
+#ifdef SMS_CYC_WATCH
+    const char *cyc_watch_file = NULL; uint16_t cyc_watch_addr = 0;
+#endif
 
     bool frames_set = false;
     for (int i=1;i<argc;i++){
@@ -156,6 +159,10 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--interp")==0) interp = true;
         else if (strcmp(argv[i],"--audio-wav")==0 && i+1<argc) audio_wav = argv[++i];
         else if (strcmp(argv[i],"--mute")==0) mute = true;
+#ifdef SMS_CYC_WATCH
+        else if (strcmp(argv[i],"--cyc-watch")==0 && i+2<argc){
+            cyc_watch_addr = (uint16_t)strtoul(argv[++i],NULL,0); cyc_watch_file = argv[++i]; }
+#endif
         else if (strcmp(argv[i],"--press")==0 && i+1<argc) press_add(argv[++i]);
         else if (strcmp(argv[i],"--window")==0){
             want_window = true;
@@ -186,6 +193,12 @@ int main(int argc, char **argv){
     glue_init(is_gg, frames);
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
+#ifdef SMS_CYC_WATCH
+    if (cyc_watch_file){
+        glue_set_cyc_watch(cyc_watch_addr, cyc_watch_file);
+        fprintf(stderr,"[runner] cyc-watch anchor=0x%04X -> %s\n", cyc_watch_addr, cyc_watch_file);
+    }
+#endif
     if (g_press_n){
         glue_set_input_cb(press_provider);
         fprintf(stderr,"[runner] scripted input: %d directive(s)\n", g_press_n);
@@ -237,6 +250,9 @@ int main(int argc, char **argv){
     if (want_window) host_shutdown();
 #endif
     wav_close();
+#ifdef SMS_CYC_WATCH
+    if (cyc_watch_file) glue_cyc_watch_close();
+#endif
 
     fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
             (unsigned long long)glue_frame_count(), glue_dispatch_miss_count());

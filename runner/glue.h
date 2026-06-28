@@ -36,6 +36,14 @@ void     glue_set_dump(uint64_t frame, const char *path);
  * Pass NULL to disable. */
 void     glue_set_vdp_trace(const char *path);
 
+#ifdef SMS_CYC_WATCH
+/* Cycle-watch oracle: record (hit_index, g_z80.cyc) each time `addr` is reached
+ * (sampled in the SMS_PC hook). The offset-independent per-anchor cycle DELTA
+ * is diffed against Mesen's exec-callback cycleCount (tools/oracle). */
+void     glue_set_cyc_watch(uint16_t addr, const char *path);
+void     glue_cyc_watch_close(void);
+#endif
+
 /* Register a live per-frame callback (e.g. the SDL host). When set, every
  * completed frame is rendered to the framebuffer and passed to `cb` as a
  * 256x192 ARGB8888 image. `cb` returns nonzero to request shutdown (the run

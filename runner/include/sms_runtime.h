@@ -163,11 +163,28 @@ static inline void sms_enter(uint16_t addr){
  * constant-to-global per instruction (not telemetry). -DSMS_TRACE_PC layers the
  * heavier per-instruction differential trace on top. */
 extern uint16_t g_dbg_pc;
+
+/* Optional always-on cycle-watch (PRINCIPLES #17): each time the anchor PC is
+ * reached, record (hit_index, g_z80.cyc). Sampled at the SMS_PC point - the
+ * same relative instant every hit - so the offset-independent per-anchor cycle
+ * DELTA (the metric that cancels the boot offset) is exact. Works for ANY PC,
+ * not just one site. Gated behind -DSMS_CYC_WATCH so the perf build pays
+ * nothing (no branch in the hot path; PRINCIPLES #18). Composes with the
+ * SMS_TRACE_PC differential trace below. */
+#ifdef SMS_CYC_WATCH
+extern uint16_t g_cyc_watch_addr; extern int g_cyc_watch_on;
+void sms_cyc_watch_hit(void);
+#define SMS_PC_HOOK_CYC(a) , ((g_cyc_watch_on && (uint16_t)(a) == g_cyc_watch_addr) \
+                              ? sms_cyc_watch_hit() : (void)0)
+#else
+#define SMS_PC_HOOK_CYC(a)
+#endif
 #ifdef SMS_TRACE_PC
 extern int g_diff_trace; void sms_diff_logpc(void);   /* differential instruction-level trace */
-#define SMS_PC(a) (g_dbg_pc = (uint16_t)(a), (g_diff_trace ? sms_diff_logpc() : (void)0))
+#define SMS_PC_HOOK_DIFF , (g_diff_trace ? sms_diff_logpc() : (void)0)
 #else
-#define SMS_PC(a) (g_dbg_pc = (uint16_t)(a))
+#define SMS_PC_HOOK_DIFF
 #endif
+#define SMS_PC(a) (g_dbg_pc = (uint16_t)(a) SMS_PC_HOOK_CYC(a) SMS_PC_HOOK_DIFF)
 
 #endif /* SMS_RUNTIME_H */

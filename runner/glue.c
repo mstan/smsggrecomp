@@ -1133,6 +1133,33 @@ void glue_run(void){
             g_z80.cyc ? 100.0 * (double)(g_z80.cyc - g_hybrid_cyc) / (double)g_z80.cyc : 0.0);
 }
 
+#ifdef SMS_CYC_WATCH
+/* Cycle-watch: per-anchor (hit,cyc) CSV. Sampled in the SMS_PC macro hook. */
+uint16_t g_cyc_watch_addr = 0;
+int      g_cyc_watch_on   = 0;
+static FILE    *g_cyc_watch_f   = NULL;
+static uint64_t g_cyc_watch_hits = 0;
+void sms_cyc_watch_hit(void){
+    if (g_cyc_watch_f)
+        fprintf(g_cyc_watch_f, "%llu,%llu\n",
+                (unsigned long long)g_cyc_watch_hits,
+                (unsigned long long)g_z80.cyc);
+    g_cyc_watch_hits++;
+}
+void glue_set_cyc_watch(uint16_t addr, const char *path){
+    if (g_cyc_watch_f){ fclose(g_cyc_watch_f); g_cyc_watch_f = NULL; }
+    g_cyc_watch_addr = addr; g_cyc_watch_hits = 0; g_cyc_watch_on = 0;
+    if (path){
+        g_cyc_watch_f = fopen(path, "w");
+        if (g_cyc_watch_f){ fprintf(g_cyc_watch_f, "hit,cyc\n"); g_cyc_watch_on = 1; }
+        else fprintf(stderr, "[runner] cannot open cyc-watch %s\n", path);
+    }
+}
+void glue_cyc_watch_close(void){
+    if (g_cyc_watch_f){ fclose(g_cyc_watch_f); g_cyc_watch_f = NULL; }
+    g_cyc_watch_on = 0;
+}
+#endif
 void     glue_set_dump(uint64_t frame, const char *path){ g_dump_frame = frame; g_dump_path = path; }
 void     glue_set_vdp_trace(const char *path){
     if (g_vdp_trace){ fclose(g_vdp_trace); g_vdp_trace = NULL; }

@@ -98,8 +98,10 @@ pause/step to synchronize two observers. Seed any frame-gated capture
 - [ ] Mesen audio capture recipe — deterministic `.mmo` + GUI Sound Recorder;
   documented in `accuracy/audio.md`. (Needs the 1 human GUI step — Mesen has no
   Lua audio API / no `--recordAudio`.)
-- [ ] `cyc_compare.py` — anchor a Z80 block-leader PC on recomp + Mesen, diff
-  Δguest-cycles per hit (offset-independent metric).
+- [x] `cyc_compare.py` + recomp `--cyc-watch ADDR file` (general arbitrary-PC
+  cycle-watch via the `SMS_PC` hook, `-DSMS_CYC_WATCH`, zero-cost when off) +
+  `mesen_cyc_watch.lua` (Mesen `cpuExec` callback). Diffs the offset-independent
+  per-anchor Δcycle. **Built 2026-06-28.**
 - [ ] `mmio_tally.py` — histogram I/O-port writes per frame (Axis 4 surface).
 - [ ] `build_instruction_coverage.py` — every opcode in the ROM × translator
   emit-coverage, with `code_generator.c` line cites (Axis 1 machine-checkable).
@@ -169,10 +171,12 @@ boundary (`:633-635`).
   the 0.043% total is purely a boot/frame-1 offset (Mesen frame-1 varies
   13,681↔58,825 run-to-run — its testRunner boot isn't cycle-deterministic
   without a `.mmo`). This is an EXTERNAL-oracle agreement, not self-agreement.
-- [ ] GREEN gate (full): the gross rate is checkpointed; the offset-independent
-  **per-anchor Δcycle** is not yet aligned. Build `cyc_compare.py` (anchor a
-  Z80 block-leader PC on both, diff Δguest-cycles per hit — cancels the boot
-  offset, per the PSX lesson). Localizes the residual ±6-cyc jitter + IM1/boot.
+- [x] **Per-anchor Δcycle vs Mesen — DONE 2026-06-28.** Anchor = IM1/VBlank
+  handler `0x0038`, 1798/1800 hits. Median Δ = **59,736 on both**; max Δ =
+  **79,206 identical**; **cumulative diff = −247 cyc over 1797 frames ≈ 0 net
+  drift** (−0.14 cyc/frame). The +0.043% gross total is thus CONFIRMED pure
+  boot-offset, not rate drift. Verdict: **JITTER-ONLY** (oscillates, no drift).
+  `_diag/accuracy/cyc0038_compare.json`.
 
 ---
 
@@ -201,7 +205,15 @@ EI-delay via `ei_block` (`sms_runtime.h:121-127`). Poll-deadline `cyc+1` while
   - Cross-ref: smspower line-IRQ timing.
   - Oracle: Mesen IRQ event timeline (Lua `addEventCallback(... irq)`) vs our
     enter-ring at the IRQ.
-- [ ] GREEN gate: validated vs interp twin only. Need Mesen IRQ-timeline diff.
+- [x] **External-oracle jitter bound (2026-06-28).** The recomp's IRQ-accept
+  timing vs Mesen at anchor `0x0038`: **mean |Δ-diff| = 8.6 cyc/frame** (0.014%
+  of a 59,736-cyc frame), diff histogram centered+symmetric on 0, **no net
+  drift** (cumulative −247 over 1797). So the ±1-insn jitter (architectural,
+  STATUS.md:435-445) is now QUANTIFIED against an accurate oracle, not just the
+  interp twin — it is small and self-cancelling, not a divergence.
+  **Lever to drive it to 0:** sub-line IRQ latch (accept at the exact T-state
+  the line-192 flag latches, the Axis-2 cross-cutting fix), not instruction
+  alignment. Tool: `cyc_compare.py` + `mesen_cyc_watch.lua`.
 
 ---
 
@@ -343,6 +355,19 @@ sim loop.
   jitter; RMS(diff)/RMS = 1.036 = √(2·(1−0.46))). Self-agreement → not GREEN,
   but it sets the bit-exact ceiling: drift-tolerant is mandatory. See
   `accuracy/audio.md`.
+
+### 2026-06-28 — Cycle axis: first per-anchor recomp-vs-Mesen diff (GREEN-leg)
+- Anchor `0x0038` (IM1/VBlank), 1800 frames: median Δ **59,736 both**, max Δ
+  **79,206 both**, **net drift ≈ 0** (−247 cyc / 1797 frames), residual = ±8.6
+  cyc/frame oscillating IRQ-accept jitter. The recomp's interrupt timing tracks
+  the accurate oracle with no systematic divergence. **Axis 3 strengthened to an
+  external-validated bound.**
+- **Mesen Lua API gotcha (this build, MesenCE 2.1.1):** the exec callback enum
+  is **`emu.callbackType.exec` (=2)**, NOT the docs' `emu.memCallbackType`
+  (which is `nil` here). Cycle field = `emu.getState().cpu.cycleCount`
+  (= `masterClock`, Z80 cycles). `emu.cpuType.sms=10`, `emu.memType.smsMemory=11`.
+  Mesen also exposes `cpu.wz` (MEMPTR) — useful for the future Axis-1 WZ item.
+  Probe recipe in `tools/oracle/_mesen_probe.lua`.
 
 ---
 
