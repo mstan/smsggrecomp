@@ -387,6 +387,20 @@ sim loop.
   but it sets the bit-exact ceiling: drift-tolerant is mandatory. See
   `accuracy/audio.md`.
 
+### 2026-06-28 — Audio Axis 5 CLOSED: isolated chip-math parity (synth_gpgx)
+- `smsref --replay-psg <chip_ring> --wav` replays the recomp's PSG register
+  stream through GPGX `psg.c` (identical inputs → isolates synthesis from CPU
+  timing). Validated faithful: gpgx-replay vs gpgx-live = ALIGNED (env 0.9925,
+  pitch 1.1¢).
+- Fixed `synth_ours` sample-drop bug (single `psg_advance` over a large
+  inter-write gap overran the 8192-frame scratch). Now ours-replay vs
+  recomp-live = ALIGNED (env 0.9956).
+- **Isolated chip-math (ours vs GPGX synth, identical chip_ring): ALIGNED** —
+  env_corr **0.977**, onset **99.4%**, pitch **4.8¢**. Our clean-room SN76489 ≈
+  GPGX `psg.c` to ~5 cents on identical inputs. The audio residual is pure
+  chip-math (volume curve / LFSR / output filter), small and NOT a logic bug.
+  **Axis 5 is now validated at both system and chip-math level.**
+
 ### 2026-06-28 — Cross-title: Sonic Blast GG audio + period-0 decision
 - Sonic Blast GG (recomp, 100% static, 0 misses) audio vs GPGX (smsref `--wav`,
   forced GG): **ALIGNED** — env_corr 0.90, onset 87.3% (234/268), pitch median

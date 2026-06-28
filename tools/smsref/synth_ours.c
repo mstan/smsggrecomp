@@ -47,18 +47,23 @@ int main(int argc, char **argv)
         uint64_t cyc = strtoull(line, NULL, 10);
         int val = atoi(comma + 1);
         if (first) { prev_cyc = cyc; first = 0; }
-        if (cyc > prev_cyc) {
-            psg_advance((uint32_t)(cyc - prev_cyc));
-            prev_cyc = cyc;
+        /* Advance in bounded chunks and drain after each — a single psg_advance
+         * over a large inter-write gap would render far more than the internal
+         * scratch (8192 frames) holds and drop samples. */
+        uint64_t delta = cyc - prev_cyc; prev_cyc = cyc;
+        while (delta > 0) {
+            uint32_t chunk = delta > 32768 ? 32768 : (uint32_t)delta;   /* <=2048 frames */
+            psg_advance(chunk); delta -= chunk;
             size_t n;
             while ((n = psg_render(buf, 4096)) > 0) { fwrite(buf, 4, n, wav); total += n; }
         }
         psg_write((uint8_t)val);
     }
-    /* tail: render ~0.3s so trailing tones decay */
-    psg_advance(rate / 3 * 16);
-    size_t n;
-    while ((n = psg_render(buf, 4096)) > 0) { fwrite(buf, 4, n, wav); total += n; }
+    /* tail: render ~0.3s so trailing tones decay (chunked, same scratch limit) */
+    for (uint32_t left = rate / 3 * 16; left > 0; ) {
+        uint32_t chunk = left > 32768 ? 32768 : left; psg_advance(chunk); left -= chunk;
+        size_t n; while ((n = psg_render(buf, 4096)) > 0) { fwrite(buf, 4, n, wav); total += n; }
+    }
 
     fseek(wav, 0, SEEK_SET); wav_hdr(wav, rate, (uint32_t)total); fclose(wav); fclose(in);
     fprintf(stderr, "synth_ours: %llu frames @ %u Hz -> %s\n",

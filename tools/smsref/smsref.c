@@ -10,6 +10,7 @@
  * (labeled Z80 regs).  GPGX is an OFFLINE oracle only (never shipped).
  */
 #include "shared.h"
+#include "blip_buf.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,13 +188,14 @@ static int run_server(int port){
 
 int main(int argc, char **argv)
 {
-    const char *rom = NULL, *out = "smsref", *dumplist = "", *wavpath = NULL;
+    const char *rom = NULL, *out = "smsref", *dumplist = "", *wavpath = NULL, *replay = NULL;
     int frames = 2000, server_port = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dumplist = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wavpath = argv[++i];
+        else if (!strcmp(argv[i], "--replay-psg") && i + 1 < argc) replay = argv[++i];
         else if (!strcmp(argv[i], "--server") && i + 1 < argc) server_port = atoi(argv[++i]);
         else if (argv[i][0] != '-') rom = argv[i];
     }
@@ -213,6 +215,39 @@ int main(int argc, char **argv)
     fprintf(stderr, "smsref: loaded %s, system_hw=0x%02X\n", rom, system_hw);
 
     if (server_port) return run_server(server_port);
+
+    /* synth_gpgx: replay a recomp PSG chip_ring (z80_cyc,val) through GPGX's
+     * psg.c, isolated from CPU timing — identical inputs to both synths, so the
+     * diff vs synth_ours is PURE chip-math (volume curve / LFSR / period-0). */
+    if (replay) {
+        FILE *in = fopen(replay, "r"); FILE *wav = fopen(wavpath ? wavpath : "gpgx_synth.wav", "wb");
+        if (!in || !wav) { fprintf(stderr, "smsref: replay open failed\n"); return 1; }
+        const uint32_t WRATE = 44100;
+        wav_hdr(wav, WRATE, 0);
+        const unsigned FRAME_M = MCYCLES_PER_LINE * lines_per_frame;   /* master cyc/frame */
+        const uint64_t FRAME_Z = FRAME_M / 15;                          /* Z80 cyc/frame (PSG=master/15) */
+        static int16_t abuf[8192];
+        uint64_t frame_base = 0, total = 0;
+        char line[128];
+        while (fgets(line, sizeof line, in)) {
+            if (line[0] == 'c') continue;
+            char *comma = strchr(line, ','); if (!comma) continue;
+            uint64_t z = strtoull(line, NULL, 10); int val = atoi(comma + 1);
+            while (z >= frame_base + FRAME_Z) {                         /* close finished frames */
+                int size = sound_update(FRAME_M); if (size > 4096) size = 4096;
+                blip_read_samples(snd.blips[0], abuf, size);
+                fwrite(abuf, 4, size, wav); total += size;
+                frame_base += FRAME_Z;
+            }
+            psg_write((unsigned)((z - frame_base) * 15), (unsigned)val);
+        }
+        int size = sound_update(FRAME_M); if (size > 4096) size = 4096;
+        blip_read_samples(snd.blips[0], abuf, size); fwrite(abuf, 4, size, wav); total += size;
+        fseek(wav, 0, SEEK_SET); wav_hdr(wav, WRATE, (uint32_t)total); fclose(wav); fclose(in);
+        fprintf(stderr, "smsref: replay-psg -> %llu frames @ %u Hz -> %s\n",
+            (unsigned long long)total, WRATE, wavpath ? wavpath : "gpgx_synth.wav");
+        return 0;
+    }
 
     /* parse dump-frame list into a sorted-enough lookup */
     int want[64], nwant = 0;
