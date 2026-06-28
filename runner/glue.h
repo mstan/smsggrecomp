@@ -35,6 +35,8 @@ void     glue_set_dump(uint64_t frame, const char *path);
  * first frame whose VDP STATE diverges -> renderer-vs-recomp discriminator.
  * Pass NULL to disable. */
 void     glue_set_vdp_trace(const char *path);
+void     glue_set_psg_log(const char *path);   /* chip_ring: (cyc,val) PSG-write log */
+void     glue_psg_log_close(void);
 
 #ifdef SMS_CYC_WATCH
 /* Cycle-watch oracle: record (hit_index, g_z80.cyc) each time `addr` is reached

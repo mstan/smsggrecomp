@@ -138,6 +138,7 @@ int main(int argc, char **argv){
     uint64_t dump_frame = 0;
     const char *dump_out = NULL;
     const char *vdp_trace = NULL;   /* per-frame VDP-state CSV (oracle diff) */
+    const char *psg_log = NULL;     /* chip_ring: (cyc,val) PSG-write log */
     bool want_window = false;
     int  win_scale = 3;
     bool interp = false;       /* oracle: run the reference superzazu interpreter */
@@ -155,6 +156,7 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--dump-frame")==0 && i+1<argc) dump_frame = strtoull(argv[++i],NULL,0);
         else if (strcmp(argv[i],"--dump-out")==0 && i+1<argc) dump_out = argv[++i];
         else if (strcmp(argv[i],"--vdp-trace")==0 && i+1<argc) vdp_trace = argv[++i];
+        else if (strcmp(argv[i],"--psg-log")==0 && i+1<argc) psg_log = argv[++i];
         else if (strcmp(argv[i],"--force-display")==0){ extern int g_vdp_force_display; g_vdp_force_display=1; }
         else if (strcmp(argv[i],"--interp")==0) interp = true;
         else if (strcmp(argv[i],"--audio-wav")==0 && i+1<argc) audio_wav = argv[++i];
@@ -193,6 +195,7 @@ int main(int argc, char **argv){
     glue_init(is_gg, frames);
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
+    if (psg_log) glue_set_psg_log(psg_log);
 #ifdef SMS_CYC_WATCH
     if (cyc_watch_file){
         glue_set_cyc_watch(cyc_watch_addr, cyc_watch_file);
@@ -250,6 +253,7 @@ int main(int argc, char **argv){
     if (want_window) host_shutdown();
 #endif
     wav_close();
+    if (psg_log) glue_psg_log_close();
 #ifdef SMS_CYC_WATCH
     if (cyc_watch_file) glue_cyc_watch_close();
 #endif

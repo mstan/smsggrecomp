@@ -72,6 +72,15 @@ static const char *g_dump_path;
  * written. Not hot-path telemetry (PRINCIPLES #18). */
 static uint64_t g_io_out_count[256];
 static uint64_t g_io_in_count[256];
+
+/* chip_ring: always-on-able log of every PSG data write tagged with the Z80
+ * cycle (the synth_replay input; mdref pattern). Enabled via --psg-log. */
+static FILE *g_psg_log;
+void glue_set_psg_log(const char *path){
+    if (g_psg_log){ fclose(g_psg_log); g_psg_log = NULL; }
+    if (path){ g_psg_log = fopen(path,"w"); if (g_psg_log) fprintf(g_psg_log,"cyc,val\n"); }
+}
+void glue_psg_log_close(void){ if (g_psg_log){ fclose(g_psg_log); g_psg_log = NULL; } }
 static void mmio_tally_dump(void){
     int n_out=0, n_in=0;
     for (int p=0;p<256;p++){ if(g_io_out_count[p]) n_out++; if(g_io_in_count[p]) n_in++; }
@@ -423,7 +432,10 @@ void sms_io_out(uint8_t p, uint8_t v){
         if (g_is_gg && p == 0x06) psg_write_stereo(v);   /* GG stereo routing register */
         return;                                          /* $3E mem-control etc.: not modelled */
     }
-    if (p < 0x80){ psg_write(v); return; }               /* PSG data ($40-$7F, canonically $7F) */
+    if (p < 0x80){                                       /* PSG data ($40-$7F, canonically $7F) */
+        if (g_psg_log) fprintf(g_psg_log,"%llu,%u\n",(unsigned long long)g_z80.cyc,v);
+        psg_write(v); return;
+    }
     if (p < 0xC0){ if (p & 1) vdp_control_write(v); else vdp_data_write(v); return; }
     (void)v;                                             /* $C0-$FF controllers: no output */
 }
