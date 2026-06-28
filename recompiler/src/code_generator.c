@@ -746,6 +746,11 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         if (islbl) fprintf(o,"L_%04X:\n", a);
         fprintf(o,"    /* %04X  %s */\n", a, in->text);
         fprintf(o,"    SMS_PC(0x%04X);\n", a);
+        /* R (memory-refresh) auto-increment: +1 per M1 opcode fetch; a prefix
+         * byte (CB/ED/DD/FD, incl. DDCB/FDCB) adds one more M1. Matches superzazu
+         * inc_r. R only affects LD A,R reads (used by some games for PRNG). */
+        fprintf(o,"    s->r = (uint8_t)((s->r & 0x80) | ((s->r + %d) & 0x7f));\n",
+                in->prefix == Z80_PFX_NONE ? 1 : 2);
         int base=cyc_base(in);
         if (base>0) fprintf(o,"    sms_tick(%d);\n", base);
         if (in->cf==Z80_CF_NONE){

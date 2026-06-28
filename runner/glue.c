@@ -634,6 +634,7 @@ static void take_irq(void){
                                           * over hundreds of frames. */
     g_z80.iff1 = g_z80.iff2 = false;     /* Z80 disables interrupts on accept */
     g_z80.halted = false;
+    g_z80.r = (uint8_t)((g_z80.r & 0x80) | ((g_z80.r + 1) & 0x7f));  /* IRQ ack M1 (superzazu inc_r) */
     /* Push the REAL interrupted PC (g_dbg_pc = address of the instruction this IRQ
      * preempted), exactly as hardware does. Control still unwinds via the C call
      * stack (the handler's RET pops these two bytes and returns here), but the
