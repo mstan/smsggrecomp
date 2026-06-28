@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 /* ---- frontend contract the core expects (osd.h) ---- */
 t_config config;
@@ -99,17 +101,91 @@ static void dump_frame(const char *prefix, int frame)
     fprintf(stderr, "smsref: dumped frame %d\n", frame);
 }
 
+/* ------------------------------------------------------------------ server */
+static long g_frame_no = 0;   /* frames advanced since reset */
+
+static uint64_t fnv1a(const void *d, size_t n){
+    const uint8_t *p = d; uint64_t h = 1469598103934665603ULL;
+    for (size_t i=0;i<n;i++){ h ^= p[i]; h *= 1099511628211ULL; } return h;
+}
+static void hexenc(const uint8_t *d, size_t n, char *out){
+    static const char *H="0123456789abcdef";
+    for (size_t i=0;i<n;i++){ out[2*i]=H[d[i]>>4]; out[2*i+1]=H[d[i]&15]; } out[2*n]=0;
+}
+static void sline(SOCKET c, const char *s){ send(c,s,(int)strlen(s),0); send(c,"\n",1,0); }
+
+/* tiny field extractors (no JSON lib): find "key": then read int */
+static long jint(const char *s, const char *key, long dflt){
+    const char *p = strstr(s, key); if (!p) return dflt; p += strlen(key);
+    while (*p && (*p==' '||*p==':'||*p=='"')) p++;
+    return (*p=='-'||(*p>='0'&&*p<='9')) ? strtol(p,NULL,0) : dflt;
+}
+
+static void cpu_json(char *o){
+    sprintf(o,"{\"frame\":%ld,\"a\":%u,\"f\":%u,\"b\":%u,\"c\":%u,\"d\":%u,\"e\":%u,"
+        "\"h\":%u,\"l\":%u,\"ix\":%u,\"iy\":%u,\"sp\":%u,\"pc\":%u,\"wz\":%u,"
+        "\"i\":%u,\"r\":%u,\"iff1\":%u,\"iff2\":%u,\"im\":%u,\"halted\":%u}",
+        g_frame_no, Z80.af.b.h,Z80.af.b.l,Z80.bc.b.h,Z80.bc.b.l,Z80.de.b.h,Z80.de.b.l,
+        Z80.hl.b.h,Z80.hl.b.l,Z80.ix.w.l,Z80.iy.w.l,Z80.sp.w.l,Z80.pc.w.l,Z80.wz.w.l,
+        Z80.i,(Z80.r&0x7f)|(Z80.r2&0x80),Z80.iff1?1:0,Z80.iff2?1:0,Z80.im,Z80.halt?1:0);
+}
+
+static int run_server(int port){
+    WSADATA w; if (WSAStartup(MAKEWORD(2,2),&w)) return 1;
+    SOCKET ls = socket(AF_INET,SOCK_STREAM,0);
+    int yes=1; setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,(char*)&yes,sizeof yes);
+    struct sockaddr_in a; memset(&a,0,sizeof a); a.sin_family=AF_INET;
+    a.sin_addr.s_addr=htonl(INADDR_LOOPBACK); a.sin_port=htons((u_short)port);
+    if (bind(ls,(struct sockaddr*)&a,sizeof a) || listen(ls,1)){ fprintf(stderr,"smsref: bind/listen %d failed\n",port); return 1; }
+    fprintf(stderr,"smsref: server on 127.0.0.1:%d\n",port);
+    static char vhex[0x8000+1]; static char obuf[0x9000];
+    for (;;){
+        SOCKET c = accept(ls,NULL,NULL); if (c==INVALID_SOCKET) break;
+        char line[512]; int li=0; int done=0;
+        while (!done){
+            char ch; int r=recv(c,&ch,1,0); if (r<=0) break;
+            if (ch=='\n'){
+                line[li]=0; li=0;
+                if      (strstr(line,"\"ping\"")) sline(c,"{\"ok\":true,\"sys\":\"smsref\"}");
+                else if (strstr(line,"\"quit\"")){ sline(c,"{\"ok\":true}"); done=1; }
+                else if (strstr(line,"\"reset\"")){ system_reset(); g_frame_no=0; sline(c,"{\"ok\":true}"); }
+                else if (strstr(line,"\"frame\"") && !strstr(line,"run")){ char o[64]; sprintf(o,"{\"frame\":%ld}",g_frame_no); sline(c,o); }
+                else if (strstr(line,"\"run_to\"")){ long tgt=jint(line,"\"frame\"",g_frame_no);
+                        while (g_frame_no<tgt){ system_frame_sms(0); g_frame_no++; } char o[64]; sprintf(o,"{\"frame\":%ld}",g_frame_no); sline(c,o); }
+                else if (strstr(line,"\"run\"")){ long k=jint(line,"\"frames\"",1);
+                        for (long i=0;i<k;i++){ system_frame_sms(0); g_frame_no++; } char o[64]; sprintf(o,"{\"frame\":%ld}",g_frame_no); sline(c,o); }
+                else if (strstr(line,"\"regs\"")){ cpu_json(obuf); sline(c,obuf); }
+                else if (strstr(line,"\"state\"")){
+                        sprintf(obuf,"{\"frame\":%ld,\"vram_h\":\"%016llx\",\"cram_h\":\"%016llx\",\"pc\":%u}",
+                            g_frame_no,(unsigned long long)fnv1a(vram,0x4000),
+                            (unsigned long long)fnv1a(cram,0x40),Z80.pc.w.l); sline(c,obuf); }
+                else if (strstr(line,"\"read_vram\"")){ hexenc(vram,0x4000,vhex);
+                        sprintf(obuf,"{\"vram\":\"%s\"}",vhex); sline(c,obuf); }
+                else if (strstr(line,"\"read_cram\"")){ uint8_t sc[32]; for(int i=0;i<32;i++) sc[i]=cram[i*2];
+                        char h[65]; hexenc(sc,32,h); sprintf(obuf,"{\"cram\":\"%s\"}",h); sline(c,obuf); }
+                else if (strstr(line,"\"read_ram\"")){ long ad=jint(line,"\"addr\"",0),len=jint(line,"\"len\"",16);
+                        if(len>0x2000)len=0x2000; static char rh[0x4001]; hexenc(work_ram+(ad&0x1fff),(size_t)len,rh);
+                        sprintf(obuf,"{\"ram\":\"%s\"}",rh); sline(c,obuf); }
+                else sline(c,"{\"error\":\"unknown cmd\"}");
+            } else if (li<(int)sizeof line-1) line[li++]=ch;
+        }
+        closesocket(c);
+    }
+    closesocket(ls); WSACleanup(); return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *rom = NULL, *out = "smsref", *dumplist = "";
-    int frames = 2000;
+    int frames = 2000, server_port = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dumplist = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+        else if (!strcmp(argv[i], "--server") && i + 1 < argc) server_port = atoi(argv[++i]);
         else if (argv[i][0] != '-') rom = argv[i];
     }
-    if (!rom) { fprintf(stderr, "usage: smsref <rom> --frames N --dump F1,F2 --out PREFIX\n"); return 2; }
+    if (!rom) { fprintf(stderr, "usage: smsref <rom> [--server PORT | --frames N --dump F1,F2 --out PREFIX]\n"); return 2; }
 
     set_config_defaults();
     memset(g_fb, 0, sizeof g_fb);
@@ -122,8 +198,9 @@ int main(int argc, char **argv)
     audio_init(44100, 0);
     system_init();
     system_reset();
-    fprintf(stderr, "smsref: loaded %s, system_hw=0x%02X, running %d frames\n",
-            rom, system_hw, frames);
+    fprintf(stderr, "smsref: loaded %s, system_hw=0x%02X\n", rom, system_hw);
+
+    if (server_port) return run_server(server_port);
 
     /* parse dump-frame list into a sorted-enough lookup */
     int want[64], nwant = 0;

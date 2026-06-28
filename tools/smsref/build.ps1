@@ -30,6 +30,6 @@ $core = @(
 )
 
 Remove-Item "$H\smsref.exe" -EA SilentlyContinue
-gcc -O1 -w -std=gnu11 @def @inc "$H\smsref.c" @core -lz -lm -o "$H\smsref.exe" 2>&1 |
+gcc -O1 -w -std=gnu11 @def @inc "$H\smsref.c" @core -lz -lm -lws2_32 -o "$H\smsref.exe" 2>&1 |
   Select-String -Pattern "error:|undefined reference|cannot find" | Select-Object -First 40
 if (Test-Path "$H\smsref.exe") { "BUILD OK" } else { "BUILD FAILED" }
