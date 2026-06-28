@@ -65,6 +65,28 @@ static uint64_t  g_hybrid_calls;    /* number of hybrid invocations */
 /* ---- frame dump ---- */
 static uint64_t  g_dump_frame = (uint64_t)-1;
 static const char *g_dump_path;
+
+/* Always-on I/O-port tally (Axis-4 MMIO surface). One counter bump per OUT/IN
+ * (both infrequent vs instructions), printed once at shutdown. Answers which
+ * ports the game actually touches and whether the unmodelled $3E/$3F are ever
+ * written. Not hot-path telemetry (PRINCIPLES #18). */
+static uint64_t g_io_out_count[256];
+static uint64_t g_io_in_count[256];
+static void mmio_tally_dump(void){
+    int n_out=0, n_in=0;
+    for (int p=0;p<256;p++){ if(g_io_out_count[p]) n_out++; if(g_io_in_count[p]) n_in++; }
+    fprintf(stderr,"[mmio] OUT ports=%d IN ports=%d | $3E.out=%llu $3F.out=%llu "
+            "(unmodelled gap; 0 => not exercised by this title)\n", n_out, n_in,
+            (unsigned long long)g_io_out_count[0x3E],
+            (unsigned long long)g_io_out_count[0x3F]);
+    fprintf(stderr,"[mmio] OUT:");
+    for (int p=0;p<256;p++) if(g_io_out_count[p])
+        fprintf(stderr," %02X=%llu",p,(unsigned long long)g_io_out_count[p]);
+    fprintf(stderr,"\n[mmio] IN :");
+    for (int p=0;p<256;p++) if(g_io_in_count[p])
+        fprintf(stderr," %02X=%llu",p,(unsigned long long)g_io_in_count[p]);
+    fprintf(stderr,"\n");
+}
 static uint32_t  g_fb[SMS_SCREEN_W * SMS_SCREEN_H];
 
 /* ---- live per-frame callback (SDL host) ---- */
@@ -363,6 +385,7 @@ int sms_slot_bank(uint16_t addr){
 }
 
 uint8_t sms_io_in(uint8_t p){
+    g_io_in_count[p]++;
     if (p < 0x40){                                       /* control / GG system ports */
         if (g_is_gg && p == 0x00)                        /* GG START on bit7 (active low) */
             return (uint8_t)(0xFF ^ ((g_pad1 & SMS_PAD_START) ? 0x80 : 0x00));
@@ -395,6 +418,7 @@ uint8_t sms_io_in(uint8_t p){
 }
 
 void sms_io_out(uint8_t p, uint8_t v){
+    g_io_out_count[p]++;
     if (p < 0x40){                                       /* memory / GG system / IO control */
         if (g_is_gg && p == 0x06) psg_write_stereo(v);   /* GG stereo routing register */
         return;                                          /* $3E mem-control etc.: not modelled */
@@ -444,9 +468,14 @@ static void frame_completed(void){
         int nz_vram=0, nz_cram=0;
         for (int i=0;i<0x4000;i++) if (g_vdp.vram[i]) nz_vram++;
         for (int i=0;i<0x40;i++)   if (g_vdp.cram[i]) nz_cram++;
-        {   /* raw VRAM/RAM dumps (<png>.vram/.ram) for recomp-vs-interp byte diffs */
+        {   /* raw VRAM/CRAM/REG/RAM dumps (<png>.vram/.cram/.regs/.ram) for
+             * byte diffs against the interp twin AND the Mesen oracle (Axis 4). */
             char vp[512]; snprintf(vp,sizeof vp,"%s.vram",g_dump_path);
             FILE *vf=fopen(vp,"wb"); if (vf){ fwrite(g_vdp.vram,1,0x4000,vf); fclose(vf); }
+            snprintf(vp,sizeof vp,"%s.cram",g_dump_path);
+            FILE *cf=fopen(vp,"wb"); if (cf){ fwrite(g_vdp.cram,1,sizeof g_vdp.cram,cf); fclose(cf); }
+            snprintf(vp,sizeof vp,"%s.regs",g_dump_path);
+            FILE *gf=fopen(vp,"wb"); if (gf){ fwrite(g_vdp.reg,1,sizeof g_vdp.reg,gf); fclose(gf); }
             snprintf(vp,sizeof vp,"%s.ram",g_dump_path);
             FILE *rf=fopen(vp,"wb"); if (rf){ fwrite(g_ram,1,sizeof g_ram,rf); fclose(rf); }
         }
@@ -1131,6 +1160,7 @@ void glue_run(void){
             (unsigned long long)g_hybrid_cyc, (unsigned long long)g_z80.cyc,
             g_z80.cyc ? 100.0 * (double)g_hybrid_cyc / (double)g_z80.cyc : 0.0,
             g_z80.cyc ? 100.0 * (double)(g_z80.cyc - g_hybrid_cyc) / (double)g_z80.cyc : 0.0);
+    mmio_tally_dump();
 }
 
 #ifdef SMS_CYC_WATCH

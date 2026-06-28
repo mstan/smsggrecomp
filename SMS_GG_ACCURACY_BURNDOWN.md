@@ -233,13 +233,23 @@ control-port latch modeled (`sms_vdp.c:29-72`).
   (`sms_slot_bank:361`). Cross-ref: smspower mapper docs.
 - [x] No DMA — correct by omission (CPU-OUT-driven VRAM fill). Cross-ref:
   smspower (SMS has no DMA engine).
-- [ ] **`$3E` memory-control + `$3F` I/O-control not modeled** (no-ops,
-  `glue.c:398-401`). Fine for cartridge-boot Sonic titles; a BIOS-dependent or
-  `$3E`-gating title would misbehave. H-counter read constant 0 (Axis 2).
-  **Lever:** implement `$3E`/`$3F` (RAM/BIOS/cart enable, I/O disable, region).
-  Cross-ref: smspower port docs; oracle: Mesen port-write trace.
-- [ ] GREEN gate: build `mmio_tally.py`; diff the per-frame port-write surface
-  vs a Mesen Lua `addMemoryCallback`/port log.
+- [x] **`$3E`/`$3F` gap CONFIRMED moot for Sonic 1 SMS (2026-06-28).** The
+  always-on `[mmio]` port tally (`glue.c`, `sms_io_out/in`) over 1800 frames:
+  OUT ports used = `7F`(PSG)/`BE`(VDP data)/`BF`(VDP ctrl); IN = `7E`/`BF`/`DC`/
+  `DD`. **`$3E.out=0 $3F.out=0`** — never written. So the unmodelled ports are
+  not exercised by this title (a real gap only for BIOS-dependent / `$3E`-gating
+  titles; note for cross-title). All ports the game DOES use are modeled.
+- [x] **GREEN runtime leg — VDP state-surface byte diff vs Mesen (2026-06-28).**
+  Recomp raw `.vram`/`.cram` (`--dump-frame`) vs Mesen `mesen_vdp_dump.lua`.
+  **3 frames byte-identical (VRAM 16384/16384 + CRAM 32/32):** static title
+  (450), fade transition (1200, disp=0), and **active-scrolling gameplay (1600,
+  r8/r9 hscroll/vscroll live)** — all MATCH at the aligned frame. The metric is
+  sharp: recomp-1600 vs Mesen-**1599** shows exactly 14 differing bytes in the
+  sprite attribute table (`0x3F24+`) = the 1-frame-old sprite positions, while
+  vs Mesen-**1600** it is byte-identical. So the recompiled CPU's `$BE/$BF` port
+  writes land the exact bytes the cycle-accurate oracle does, even mid-scroll —
+  *tighter* than the recomp-vs-interp drift. Tools:
+  `tools/oracle/{mesen_vdp_dump.lua,vdp_diff.py}`.
 
 ---
 
@@ -356,6 +366,17 @@ sim loop.
   but it sets the bit-exact ceiling: drift-tolerant is mandatory. See
   `accuracy/audio.md`.
 
+### 2026-06-28 — MMIO axis (Axis 4): VDP state-surface GREEN, $3E/$3F gap moot
+- Port tally over 1800 frames: Sonic 1 SMS uses only `7F/BE/BF` (out) +
+  `7E/BF/DC/DD` (in); **`$3E`/`$3F` never written** → the unmodelled-port gap is
+  not exercised by this title (note only for cross-title / BIOS-dependent ROMs).
+- VDP state-surface byte diff vs Mesen at 3 frames (title 450, fade 1200,
+  scroll 1600): **VRAM 16 KB + CRAM 32 B byte-identical at every aligned frame.**
+  The recompiled CPU's MMIO writes reproduce the cycle-accurate oracle's VDP
+  memory exactly, even mid-scroll. **Axis 4 GREEN for the exercised path.**
+  (Caveat #23: representative frames, not every frame; the tool is reusable for
+  any frame / any title.)
+
 ### 2026-06-28 — Cycle axis: first per-anchor recomp-vs-Mesen diff (GREEN-leg)
 - Anchor `0x0038` (IM1/VBlank), 1800 frames: median Δ **59,736 both**, max Δ
   **79,206 both**, **net drift ≈ 0** (−247 cyc / 1797 frames), residual = ±8.6
@@ -388,13 +409,15 @@ sufficient.
 accurately-diffable cycle axis. Audio keeps its drift-tolerant gross-regression
 tool only.)
 
-1. **Cycle (Axis 2) — ACTIVE.** Mesen Lua cycle trace is live (gross rate
-   checkpointed at +0.043%). Build `cyc_compare.py` (offset-independent
-   per-anchor Δ) to localize the residual; land the sub-line VDP stepping (the
-   cross-cutting lever); re-measure Axes 2/3.
-2. **MMIO (Axis 4)** — `mmio_tally.py` + Mesen port trace; implement `$3E/$3F`.
-3. **Instruction (Axis 1)** — zexall/zexdoc through runner + Mesen;
-   `build_instruction_coverage.py`; drive WZ.
+1. ~~**Cycle (Axis 2/3)**~~ — DONE 2026-06-28. Per-anchor Δ vs Mesen =
+   JITTER-ONLY, no net drift. Sub-line VDP stepping remains the optional lever
+   to drive the ±8.6-cyc residual to 0 (also makes Axis 2 cycle-accurate).
+2. ~~**MMIO (Axis 4)**~~ — DONE 2026-06-28. VDP VRAM+CRAM byte-identical vs
+   Mesen across 3 frames incl. active scroll; `$3E/$3F` confirmed unused. GREEN
+   for the exercised path.
+3. **Instruction (Axis 1) — NEXT.** zexall/zexdoc through runner + Mesen;
+   `build_instruction_coverage.py` (every ROM opcode × translator emit);
+   drive WZ for the masked BIT n,(HL) X/Y flags (Mesen exposes `cpu.wz`).
 4. **Audio (Axis 5)** — keep the drift-tolerant diff as a gross-regression
    gate; external oracle DEFERRED (see Axis 5). Revisit only via the headless
    GPGX synthesis-isolation oracle if precise chip-math diffing is wanted.
