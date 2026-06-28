@@ -22,6 +22,7 @@ build_recomp/
 
 # Per-run / generated artifacts
 **/__pycache__/
+_diag/
 *.log
 *.err
 dispatch_misses.log
