@@ -64,6 +64,25 @@ static const int16_t SN_VOL[16] = {
     0x0512, 0x0407, 0x0333, 0x028A, 0x0204, 0x019A, 0x0146, 0x0000
 };
 
+/* Measurement-only: dump the LATCHED register state (the MMIO-written values)
+ * as labeled text, for the recomp-vs-Mesen PSG state diff (Axis 5, no waveform).
+ * lfsr/counters are sub-cycle state and may jitter; the periods/vols are the
+ * values the CPU actually wrote and should match the oracle exactly. */
+void psg_dump_state_text(FILE *f)
+{
+    const SN76489 *p = &s_sn;
+    fprintf(f, "tone0_period=%u\n", p->tone_period[0]);
+    fprintf(f, "tone1_period=%u\n", p->tone_period[1]);
+    fprintf(f, "tone2_period=%u\n", p->tone_period[2]);
+    fprintf(f, "tone0_vol=%u\n", p->vol[0]);
+    fprintf(f, "tone1_vol=%u\n", p->vol[1]);
+    fprintf(f, "tone2_vol=%u\n", p->vol[2]);
+    fprintf(f, "noise_vol=%u\n", p->vol[3]);
+    fprintf(f, "noise_ctrl=%u\n", p->noise_ctrl);
+    fprintf(f, "lfsr=%u\n", p->lfsr);
+    fprintf(f, "gg_panning=%u\n", p->gg_stereo);
+}
+
 static void sn_reset(SN76489 *p)
 {
     memset(p, 0, sizeof *p);

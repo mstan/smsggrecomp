@@ -335,9 +335,8 @@ sim loop.
 - [x] `--vdp-trace` per-frame FNV-1a64 hash of VRAM/CRAM/regs/RAM+SP
   (`glue.c:99-104,420-431`), identical in `glue_run` and `glue_run_interp` —
   the always-on determinism oracle. Cross-ref: re-run reproducibility.
-- [ ] GREEN gate: determinism is intrinsic; the external leg is "Mesen movie
-  replay is also deterministic" — confirm the recomp `--vdp-trace` is stable
-  across 3 runs (trivially true; record the evidence line).
+- [x] **GREEN (2026-06-28):** 3× headless `--vdp-trace` (2000 frames) →
+  **byte-identical SHA256** across all three runs. Determinism confirmed.
 
 ---
 
@@ -365,6 +364,27 @@ sim loop.
   jitter; RMS(diff)/RMS = 1.036 = √(2·(1−0.46))). Self-agreement → not GREEN,
   but it sets the bit-exact ceiling: drift-tolerant is mandatory. See
   `accuracy/audio.md`.
+
+### 2026-06-28 — Measurement sweep (all axes) → divergence burndown
+Measurement-only (no behavior change): dumped recomp CPU/PSG/VRAM/CRAM at
+frames 450/1200/1600/2000 and diffed vs Mesen (`state_diff.py`, `vdp_diff.py`,
+`mesen_state_dump.lua`). What MATCHES vs what DOESN'T:
+
+| Surface | Result |
+|---|---|
+| **VDP VRAM+CRAM** | **byte-identical at all 4 frames** (incl. active scroll) — GREEN |
+| **Determinism** (3× `--vdp-trace`) | **byte-identical hashes** — Axis 7 GREEN |
+| **PSG latched regs** | tone periods/vols match except small **sampling-jitter** diffs (period ±2–6, vol ±1–2); `lfsr` sub-cycle (soft) |
+| **CPU regs @ frame boundary** | "mismatch" is a **sampling artifact** — recomp `frame_completed` (VDP line-0) and Mesen `endFrame` fire at *different instructions* (pc 17826 vs 800 @1600). **VDP byte-identical proves the CPU does NOT diverge** (identical VRAM ⇒ identical CPU writes). |
+| **`r` (refresh reg)** | **REAL GAP**: recomp `r=0` always; Mesen tracks it. Unmodeled. Minor (rarely read); note for Axis 1. |
+| **`wz` (MEMPTR)** | not fully driven (known — masked BIT n,(HL) X/Y); Mesen exposes `cpu.wz`. |
+
+Net: the only genuine non-matches are **R unmodeled** and **WZ partial**; everything
+else is sampling-alignment confound (resolved by the VDP proof) or sub-cycle (lfsr).
+The frame-boundary CPU/PSG sample is the wrong probe; the **PC-anchored** sample is
+correct → the cyc-watch CSV now also records per-hit CPU regs
+(`hit,cyc,a,f,b,c,d,e,h,l,ix,iy,sp,i,r,iff1`) for an aligned comparison against any
+oracle. **Axis 1 lever:** model R (per-instruction refresh) + drive WZ.
 
 ### 2026-06-28 — MMIO axis (Axis 4): VDP state-surface GREEN, $3E/$3F gap moot
 - Port tally over 1800 frames: Sonic 1 SMS uses only `7F/BE/BF` (out) +

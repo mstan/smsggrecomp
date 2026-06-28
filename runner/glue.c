@@ -478,6 +478,23 @@ static void frame_completed(void){
             FILE *gf=fopen(vp,"wb"); if (gf){ fwrite(g_vdp.reg,1,sizeof g_vdp.reg,gf); fclose(gf); }
             snprintf(vp,sizeof vp,"%s.ram",g_dump_path);
             FILE *rf=fopen(vp,"wb"); if (rf){ fwrite(g_ram,1,sizeof g_ram,rf); fclose(rf); }
+            /* labeled CPU register state (vs Mesen getState().cpu, Axis 1/6) */
+            snprintf(vp,sizeof vp,"%s.cpu",g_dump_path);
+            FILE *pf=fopen(vp,"w");
+            if (pf){
+                fprintf(pf,"a=%u\nf=%u\nb=%u\nc=%u\nd=%u\ne=%u\nh=%u\nl=%u\n",
+                    g_z80.a,g_z80.f,g_z80.b,g_z80.c,g_z80.d,g_z80.e,g_z80.h,g_z80.l);
+                fprintf(pf,"a_=%u\nf_=%u\nb_=%u\nc_=%u\nd_=%u\ne_=%u\nh_=%u\nl_=%u\n",
+                    g_z80.a_,g_z80.f_,g_z80.b_,g_z80.c_,g_z80.d_,g_z80.e_,g_z80.h_,g_z80.l_);
+                fprintf(pf,"ix=%u\niy=%u\nsp=%u\npc=%u\nwz=%u\ni=%u\nr=%u\n"
+                          "iff1=%u\niff2=%u\nim=%u\nhalted=%u\n",
+                    g_z80.ix,g_z80.iy,g_z80.sp,(unsigned)g_dbg_pc,g_z80.wz,g_z80.i,g_z80.r,
+                    g_z80.iff1,g_z80.iff2,g_z80.im,g_z80.halted);
+                fclose(pf);
+            }
+            /* labeled PSG latched-register state (vs Mesen getState().psg, Axis 5) */
+            snprintf(vp,sizeof vp,"%s.psg",g_dump_path);
+            FILE *sf=fopen(vp,"w"); if (sf){ psg_dump_state_text(sf); fclose(sf); }
         }
         fprintf(stderr,
             "[vdp] dump@%llu disp=%d r0=%02X r1=%02X r2=%02X r5=%02X r6=%02X "
@@ -1171,9 +1188,14 @@ static FILE    *g_cyc_watch_f   = NULL;
 static uint64_t g_cyc_watch_hits = 0;
 void sms_cyc_watch_hit(void){
     if (g_cyc_watch_f)
-        fprintf(g_cyc_watch_f, "%llu,%llu\n",
-                (unsigned long long)g_cyc_watch_hits,
-                (unsigned long long)g_z80.cyc);
+        /* PC-anchored register sample: at the same anchor hit on both recomp
+         * and Mesen, the architectural register state is aligned (unlike the
+         * frame-boundary sample, which fires at different instructions). */
+        fprintf(g_cyc_watch_f,
+            "%llu,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+            (unsigned long long)g_cyc_watch_hits, (unsigned long long)g_z80.cyc,
+            g_z80.a,g_z80.f,g_z80.b,g_z80.c,g_z80.d,g_z80.e,g_z80.h,g_z80.l,
+            g_z80.ix,g_z80.iy,g_z80.sp,g_z80.i,g_z80.r,(unsigned)g_z80.iff1);
     g_cyc_watch_hits++;
 }
 void glue_set_cyc_watch(uint16_t addr, const char *path){
@@ -1181,7 +1203,7 @@ void glue_set_cyc_watch(uint16_t addr, const char *path){
     g_cyc_watch_addr = addr; g_cyc_watch_hits = 0; g_cyc_watch_on = 0;
     if (path){
         g_cyc_watch_f = fopen(path, "w");
-        if (g_cyc_watch_f){ fprintf(g_cyc_watch_f, "hit,cyc\n"); g_cyc_watch_on = 1; }
+        if (g_cyc_watch_f){ fprintf(g_cyc_watch_f, "hit,cyc,a,f,b,c,d,e,h,l,ix,iy,sp,i,r,iff1\n"); g_cyc_watch_on = 1; }
         else fprintf(stderr, "[runner] cannot open cyc-watch %s\n", path);
     }
 }

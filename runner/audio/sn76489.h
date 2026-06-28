@@ -40,6 +40,7 @@ void   psg_reset_leftover(void);
 
 /* Save-state hooks (own-backend snapshots). Returns 1 on success. */
 #include <stdio.h>
+void psg_dump_state_text(FILE *f);   /* measurement: labeled latched-register dump */
 int psg_save_state(FILE *f);
 int psg_load_state(FILE *f);
 
