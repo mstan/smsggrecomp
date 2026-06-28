@@ -101,6 +101,14 @@ static void dump_frame(const char *prefix, int frame)
     fprintf(stderr, "smsref: dumped frame %d\n", frame);
 }
 
+/* WAV header (S16 stereo); patched with frame count at the end. */
+static void wav_hdr(FILE *f, uint32_t rate, uint32_t nframes){
+    uint32_t bytes=nframes*4, byterate=rate*4, riff=36+bytes, fmtlen=16; uint16_t pcm=1,ch=2,ba=4,bits=16;
+    fwrite("RIFF",1,4,f); fwrite(&riff,4,1,f); fwrite("WAVE",1,4,f); fwrite("fmt ",1,4,f);
+    fwrite(&fmtlen,4,1,f); fwrite(&pcm,2,1,f); fwrite(&ch,2,1,f); fwrite(&rate,4,1,f);
+    fwrite(&byterate,4,1,f); fwrite(&ba,2,1,f); fwrite(&bits,2,1,f); fwrite("data",1,4,f); fwrite(&bytes,4,1,f);
+}
+
 /* ------------------------------------------------------------------ server */
 static long g_frame_no = 0;   /* frames advanced since reset */
 
@@ -176,12 +184,13 @@ static int run_server(int port){
 
 int main(int argc, char **argv)
 {
-    const char *rom = NULL, *out = "smsref", *dumplist = "";
+    const char *rom = NULL, *out = "smsref", *dumplist = "", *wavpath = NULL;
     int frames = 2000, server_port = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dumplist = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wavpath = argv[++i];
         else if (!strcmp(argv[i], "--server") && i + 1 < argc) server_port = atoi(argv[++i]);
         else if (argv[i][0] != '-') rom = argv[i];
     }
@@ -207,10 +216,18 @@ int main(int argc, char **argv)
     { char buf[256]; strncpy(buf, dumplist, sizeof buf - 1); buf[sizeof buf - 1] = 0;
       for (char *t = strtok(buf, ","); t && nwant < 64; t = strtok(NULL, ",")) want[nwant++] = atoi(t); }
 
+    FILE *wav = NULL; uint64_t wav_total = 0; const uint32_t WRATE = 44100;
+    static int16_t abuf[8192];
+    if (wavpath) { wav = fopen(wavpath, "wb"); if (wav) wav_hdr(wav, WRATE, 0); }
+
     for (int fr = 1; fr <= frames; fr++) {
         system_frame_sms(0);
+        if (wav) { int n = audio_update(abuf); if (n > 0) { fwrite(abuf, 4, n, wav); wav_total += n; } }
         for (int k = 0; k < nwant; k++) if (want[k] == fr) dump_frame(out, fr);
     }
+    if (wav) { fseek(wav, 0, SEEK_SET); wav_hdr(wav, WRATE, (uint32_t)wav_total); fclose(wav);
+        fprintf(stderr, "smsref: wrote %llu audio frames @ %u Hz -> %s\n",
+            (unsigned long long)wav_total, WRATE, wavpath); }
     fprintf(stderr, "smsref: done (%d frames)\n", frames);
     return 0;
 }

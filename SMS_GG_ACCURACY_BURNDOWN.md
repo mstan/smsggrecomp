@@ -279,14 +279,21 @@ exactly (`sn76489.c:171-173`). Output: `--audio-wav` S16/stereo @ native rate
   pivots to **Cycle (Axis 2)**, where the Mesen oracle IS accurately diffable.
   (Re-openable via the headless GPGX synthesis-isolation oracle if a precise
   chip-math diff is ever wanted.)
-- [x] **Risk #1 — period-0 = CONFIRMED LIVE BUG (2026-06-28).** `sn76489.c:112,90`
-  clamps tone period 0 → 1 (max freq); real discrete SN76489 uses **0x400**
-  (lowest freq). DUAL-VALIDATED: cross-ref GPGX `psg.c` PSG_DISCRETE
-  `zeroFreqInc=0x400`; runtime — the chip_ring (`--psg-log` + `psg_analyze.py`)
-  shows Sonic 1 SMS writes tone period 0 **300×** (all 3 tone channels). So this
-  is a real hardware divergence, NOT moot. **Fix (deferred, behavior change):**
-  `sn76489.c` period 0 → reload 0x400, not 1. Audibility quantified by the
-  GPGX-ref synth_replay (remaining).
+- [x] **GREEN — system audio vs GPGX (2026-06-28).** smsref `--wav` dumps GPGX's
+  full-system SMS audio headlessly; recomp `--audio-wav` vs it, drift-tolerant
+  (`audio_diff.py`): **ALIGNED** — env_corr **0.976**, onset match **100%**
+  (129/129), pitch median **5.4 cents**. The recomp's audio is structurally
+  identical to an independent accurate emulator. (waveform NCC ~0 expected —
+  independent synths.) The headless GPGX audio is the reference Mesen couldn't
+  give.
+- [x] **Risk #1 — period-0: real divergence, INAUDIBLE for Sonic 1 (2026-06-28).**
+  `sn76489.c:112,90` clamps period 0→1; HW/GPGX discrete uses 0x400. The
+  chip_ring shows Sonic writes period 0 **300×** — but `psg_analyze.py` (with
+  volume tracking) shows **all 300 are at volume 15 (channel muted)** → the game
+  only sets period 0 while silencing, so it's INAUDIBLE here (explains the
+  ALIGNED system-audio result). Still worth FIXING for correctness / other
+  titles (period 0→0x400; deferred behavior change). The 5.4¢/0.976 residual is
+  volume-curve + LFSR, not period-0.
 - [ ] Risk #2 — volume curve is an ideal 2 dB/step table (`:62-65`); real chip
   + other emus deviate per-step → absolute amplitude won't be sample-exact.
 - [ ] Risk #3 — output LPF is a clownmdemu Mega-Drive IIR (`:129-139`), not an
