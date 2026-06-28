@@ -44,8 +44,8 @@ void    vdp_control_write(uint8_t v);   /* port $BF write */
 void    vdp_data_write(uint8_t v);      /* port $BE write */
 uint8_t vdp_data_read(void);            /* port $BE read  */
 uint8_t vdp_status_read(void);          /* port $BF read (clears INT flags) */
-uint8_t vdp_vcounter(void);             /* port $7E read  */
-uint8_t vdp_hcounter(void);             /* port $7F read  */
+uint8_t vdp_vcounter(void);             /* port $7E read (mode-4 NTSC jback) */
+uint8_t vdp_hcounter(int sub_line_cyc); /* port $7F read; sub_line_cyc = Z80 T-states into the current line */
 
 /* Step the VDP one scanline (called by the runner's sms_sync). Updates the
  * line counter and latches line/frame interrupts. */

@@ -174,16 +174,20 @@ boundary (`:633-635`).
   `LD (IX/IY+d),n` = 19 not 22 (`code_generator.c:289-294`); block ops tick
   per-iteration 21/16 (`:533`); IM1 accept = 13 T (`glue.c:572`). Cross-ref:
   Z80 timing tables (smspower / Sean Young Z80 undoc).
-- [ ] **VDP sub-line state not modeled** — `vdp_hcounter()` returns constant 0
-  (`sms_vdp.c:98`); V-counter is a monotonic line approximation with no
-  mid-frame jump-back (`:91-96`). GAP vs cycle-accurate.
-  **Lever (cross-cutting #1):** step the VDP to the exact `s->cyc` in
-  `advance_vdp` with a real H-counter + V-counter jback. Tightens Axes 2/3/4
-  at once.
-  - Cross-ref: smspower VDP timing (H/V counter tables, 228 T/line, 256/342
-    pixel-clocks).
-  - Oracle: `cyc_compare.py` Δcycle-per-anchor recomp↔Mesen
-    (`emu.getState().cpu.cycleCount`).
+- [x] **Sub-line H/V counters — DONE 2026-06-28 (the "last lever", scoped).**
+  `vdp_vcounter()` now does the NTSC mode-4 jump-back (≤0xDA→l, else l−6; matches
+  GPGX `vc_table {0xDA,0xF2}`). `vdp_hcounter(sub_line_cyc)` derives a clean-room
+  H value from the sub-line cycle (`g_z80.cyc − line_start`) vs the prior 0.
+  Both titles read `$7E` (V-counter) but NOT `$7F` (H-counter) → hardware-correct
+  where exercised, latent for H. Verified: Sonic 1 + Sonic Blast VDP **stay
+  byte-identical to GPGX** (no regression). **Honest scope — NOT pursued:**
+  (a) the ±8.6 cyc jitter — the recomp already accepts the IRQ at the HW-correct
+  instruction boundary; the residual is frame-boundary placement between two
+  emulators, not sub-line VDP state, so reducing it = emulator-matching
+  (rejected by PRINCIPLES); (b) raster — the renderer is a full-frame snapshot
+  and the tested titles do 0 active-display VDP writes (write-ring proven). The
+  exact per-cycle H table is GPGX-licensed (oracle-only); a clean-room exact
+  table is a separate, unused-by-tested-titles task.
 - [~] **External gross-rate checkpoint vs Mesen (2026-06-28).** Recomp
   (`tools/oracle/mesen_trace.lua` headless) vs Mesen 2.1.1, Sonic 1 SMS, 1800
   frames: recomp **107,524,801** Z80 cyc vs Mesen **107,478,745** (+0.043%).

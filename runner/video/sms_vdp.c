@@ -89,13 +89,28 @@ uint8_t vdp_status_read(void){
 }
 
 uint8_t vdp_vcounter(void){
-    /* SMS V-counter has a mid-frame jback; a monotonic approximation is fine
-     * for bring-up (games mostly compare against fixed thresholds). */
+    /* SMS NTSC mode-4 V-counter: 0x00..0xDA, then a jump-back to 0xD5 (line 219)
+     * running to 0xFF (line 261) — total 262 lines. Matches GPGX vc_table
+     * {0xDA,0xF2}. (Active display is lines 0..191 < 0xDA, so this only changes
+     * vblank-region reads — but it's now hardware-correct everywhere.) */
     int l = g_vdp.line;
-    return (uint8_t)(l < 0x100 ? l : 0xFF);
+    return (uint8_t)(l <= 0xDA ? l : l - 6);
 }
 
-uint8_t vdp_hcounter(void){ return 0; }
+/* SMS 256-pixel-mode H-counter. The real chip exposes a 342-pixel/line counter
+ * whose read value rises 0x00..0x93 over the visible span then jumps to
+ * 0xE9..0xFF across HBLANK. This is a clean-room piecewise approximation from
+ * the sub-line cycle (228 T-states/line, ~1.5 pixel-clocks per T-state); it is
+ * NOT the exact per-cycle table (which is emulator-specific and unused by the
+ * tested titles), but it is monotone + correctly shaped, vs the prior constant
+ * 0. sub_line_cyc is clamped to [0,227]. */
+uint8_t vdp_hcounter(int sub_line_cyc){
+    if (sub_line_cyc < 0) sub_line_cyc = 0;
+    if (sub_line_cyc > 227) sub_line_cyc = 227;
+    int px = (sub_line_cyc * 342) / 228;          /* pixel position 0..341 */
+    if (px <= 0x127)        return (uint8_t)(px >> 1);                 /* 0x00..0x93 */
+    return (uint8_t)(((px - 0x128) >> 1) + 0xE9);                      /* 0xE9..0xFF */
+}
 
 void vdp_step_line(void){
     /* Line-interrupt counter: active across lines 0..192, reload otherwise. */

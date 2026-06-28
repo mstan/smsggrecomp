@@ -400,7 +400,15 @@ uint8_t sms_io_in(uint8_t p){
             return (uint8_t)(0xFF ^ ((g_pad1 & SMS_PAD_START) ? 0x80 : 0x00));
         return 0xFF;
     }
-    if (p < 0x80) return (p & 1) ? vdp_hcounter() : vdp_vcounter();
+    if (p < 0x80){                                       /* $7E V-counter / $7F H-counter */
+        if (p & 1){
+            /* sub-line position: the VDP line is already synced to >= cyc by the
+             * deadline, so the current line started at g_next_line_cyc - one line. */
+            int sub = (int)((int64_t)g_z80.cyc - ((int64_t)g_next_line_cyc - SMS_CYC_PER_LINE));
+            return vdp_hcounter(sub);
+        }
+        return vdp_vcounter();
+    }
     if (p < 0xC0) return (p & 1) ? vdp_status_read() : vdp_data_read();
     /* $C0-$FF controller ports, active low (0 = pressed). Even ($DC) = P1 D-pad
      * + buttons + P2 up/down; odd ($DD) = P2 left/right/buttons + reset/TH
