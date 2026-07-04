@@ -120,3 +120,13 @@ Not yet declared. Code in this repo is original except where noted in
 **Acknowledgements** above: the vendored `runner/external/superzazu/z80.c` is
 MIT (see its own `LICENSE`). The clean-room SN76489 PSG is original to this
 project.
+
+---
+
+<p align="center">
+  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>
