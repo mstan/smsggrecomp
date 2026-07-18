@@ -28,6 +28,11 @@ PC. An incomplete upload, different revision, or uncaptured self-modifying code
 calls the host's `sms_dispatch_miss()` fallback. Matching code has no runtime
 opcode decode; the host retains the fallback policy and scheduler.
 
+For stable opcode shapes whose operand bytes are commonly self-modified, the
+generated case keeps the opcode statically decoded and reads the live immediate
+or indexed displacement at execution time. This avoids treating ordinary
+operand changes as new code.
+
 The host supplies the normal `sms_runtime.h` bus functions and `Z80State`. If
 it already defines a symbol named `call_by_address`, compile with
 `SMS_RUNTIME_NO_CALL_BY_ADDRESS` to omit the function-form runtime declaration.

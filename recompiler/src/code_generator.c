@@ -1025,6 +1025,69 @@ static void emit_flat_match(FILE *o, const Z80Insn *in, uint16_t addr)
     fprintf(o, "            return;\n        }\n");
 }
 
+/* Some Genesis sound drivers self-modify operand bytes in otherwise-stable
+ * instruction templates (notably loop counts and indexed sample-table
+ * displacements). The opcode is still statically decoded; read only the
+ * mutable operand at runtime so every new value does not become an interpreter
+ * miss. Return true when a live-operand case was emitted. */
+static bool emit_flat_live_operands(FILE *o, const Z80Insn *in, uint16_t addr)
+{
+    if (in->prefix == Z80_PFX_NONE && in->length == 3 &&
+        (in->opcode == 0x22 || in->opcode == 0x2A ||
+         in->opcode == 0x32 || in->opcode == 0x3A)) {
+        fprintf(o, "        if (sms_read8(0x%04X) == 0x%02X) {\n", addr,
+                in->opcode);
+        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + 1) & 0x7f));\n");
+        fprintf(o, "        s->pc = 0x%04X;\n", (uint16_t)(addr + 3));
+        fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
+        fprintf(o, "        uint16_t nn = sms_read16(0x%04X);\n",
+                (uint16_t)(addr + 1));
+        switch (in->opcode) {
+        case 0x22: fprintf(o, "        sms_write16(nn, z80_hl(s));\n"); break;
+        case 0x2A: fprintf(o, "        z80_set_hl(s, sms_read16(nn));\n"); break;
+        case 0x32: fprintf(o, "        sms_write8(nn, s->a);\n"); break;
+        case 0x3A: fprintf(o, "        s->a = sms_read8(nn);\n"); break;
+        }
+        fprintf(o, "            return;\n        }\n");
+        return true;
+    }
+
+    if (in->prefix == Z80_PFX_NONE && (in->opcode & 0xC7) == 0x06 &&
+        in->length == 2) {
+        int y = (in->opcode >> 3) & 7;
+        OpCtx c = {NULL, false, 0};
+        char value[40];
+        snprintf(value, sizeof value, "sms_read8(0x%04X)", (uint16_t)(addr + 1));
+        fprintf(o, "        if (sms_read8(0x%04X) == 0x%02X) {\n", addr,
+                in->opcode);
+        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + 1) & 0x7f));\n");
+        fprintf(o, "        s->pc = 0x%04X;\n", (uint16_t)(addr + 2));
+        fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
+        if (y == 6) fprintf(o, "        uint16_t ea = z80_hl(s);\n");
+        fprintf(o, "        %s\n", r8w(&c, y, value));
+        fprintf(o, "            return;\n        }\n");
+        return true;
+    }
+
+    if ((in->prefix == Z80_PFX_DD || in->prefix == Z80_PFX_FD) &&
+        in->uses_disp && in->length == 3 &&
+        (in->opcode >> 6) == 2 && (in->opcode & 7) == 6) {
+        const char *idx = in->prefix == Z80_PFX_DD ? "s->ix" : "s->iy";
+        int alu = (in->opcode >> 3) & 7;
+        fprintf(o, "        if (sms_read8(0x%04X) == 0x%02X && sms_read8(0x%04X) == 0x%02X) {\n",
+                addr, in->raw[0], (uint16_t)(addr + 1), in->opcode);
+        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + 2) & 0x7f));\n");
+        fprintf(o, "        s->pc = 0x%04X;\n", (uint16_t)(addr + 3));
+        fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
+        fprintf(o, "        uint16_t ea = (uint16_t)(%s + (int8_t)sms_read8(0x%04X));\n",
+                idx, (uint16_t)(addr + 2));
+        emit_alu(o, alu, "sms_read8(ea)");
+        fprintf(o, "            return;\n        }\n");
+        return true;
+    }
+    return false;
+}
+
 void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
                        const char *out_dir, const SmsRom *variants,
                        int variant_count)
@@ -1102,8 +1165,19 @@ void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
          * bytes. A different revision, incomplete upload, or uncaptured
          * self-modified instruction takes the host's explicit interpreter
          * fallback. Matching paths perform no runtime opcode decode. */
-        for (int u = 0; u < unique_count; ++u)
-            emit_flat_match(o, &decoded[u], addr);
+        bool same_shape = true;
+        for (int u = 1; u < unique_count; ++u) {
+            if (decoded[u].prefix != decoded[0].prefix ||
+                decoded[u].opcode != decoded[0].opcode ||
+                decoded[u].length != decoded[0].length) {
+                same_shape = false;
+                break;
+            }
+        }
+        if (!(same_shape && emit_flat_live_operands(o, &decoded[0], addr))) {
+            for (int u = 0; u < unique_count; ++u)
+                emit_flat_match(o, &decoded[u], addr);
+        }
         fprintf(o, "        sms_dispatch_miss(0x%04X);\n        return;\n    }\n", addr);
         emitted++;
         alternatives += (unsigned)(unique_count - 1);
