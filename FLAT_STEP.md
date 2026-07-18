@@ -9,15 +9,24 @@ devices, reset, bus ownership, and interrupts.
 SmsRecomp --game path/to/game.toml --flat-step
 ```
 
+For a cartridge that uploads or patches more than one code image over time,
+add one or more captures:
+
+```sh
+SmsRecomp --game path/to/game.toml --flat-step \
+  --flat-step-variant path/to/later-z80-ram.bin
+```
+
 The command writes `generated/<prefix>_step.c` and `_step.h`. The generated
 `<prefix>_step()` executes exactly one decoded instruction from `g_z80.pc` and
 returns. Every byte offset in the input image is emitted as a possible PC, so
 computed control flow does not depend on a profiling manifest.
 
 The generated cases guard their compiled instruction bytes against live
-memory. An incomplete upload, different revision, or self-modifying code calls
-the host's `sms_dispatch_miss()` fallback. Matching code has no runtime opcode
-decode; the host retains the fallback policy and scheduler.
+memory. Captured variants become alternate compiled byte sequences at the same
+PC. An incomplete upload, different revision, or uncaptured self-modifying code
+calls the host's `sms_dispatch_miss()` fallback. Matching code has no runtime
+opcode decode; the host retains the fallback policy and scheduler.
 
 The host supplies the normal `sms_runtime.h` bus functions and `Z80State`. If
 it already defines a symbol named `call_by_address`, compile with

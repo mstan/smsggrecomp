@@ -985,12 +985,57 @@ static void emit_flat_cf(FILE *o, const Z80Insn *in, uint16_t next)
     }
 }
 
+static void emit_flat_body(FILE *o, const Z80Insn *in, uint16_t addr)
+{
+    uint16_t next = (uint16_t)(addr + in->length);
+    fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + %d) & 0x7f));\n",
+            in->prefix == Z80_PFX_NONE ? 1 : 2);
+    fprintf(o, "        s->pc = 0x%04X;\n", next);
+
+    if (flat_is_repeat_block(in)) {
+        emit_flat_repeat(o, in, addr, next);
+    } else {
+        int base = cyc_base(in);
+        if (base > 0) fprintf(o, "        s->cyc += %d;\n", base);
+        if (in->is_halt) {
+            fprintf(o, "        s->halted = true;\n");
+        } else if (in->cf == Z80_CF_NONE) {
+            emit_op(o, in);
+        } else {
+            emit_flat_cf(o, in, next);
+        }
+    }
+}
+
+static bool flat_same_bytes(const Z80Insn *a, const Z80Insn *b)
+{
+    return a->length == b->length && memcmp(a->raw, b->raw, a->length) == 0;
+}
+
+static void emit_flat_match(FILE *o, const Z80Insn *in, uint16_t addr)
+{
+    fprintf(o, "        if (");
+    for (unsigned bi = 0; bi < in->length; ++bi) {
+        if (bi) fprintf(o, " && ");
+        fprintf(o, "sms_read8(0x%04X) == 0x%02X", (uint16_t)(addr + bi),
+                in->raw[bi]);
+    }
+    fprintf(o, ") {\n");
+    emit_flat_body(o, in, addr);
+    fprintf(o, "            return;\n        }\n");
+}
+
 void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
-                       const char *out_dir)
+                       const char *out_dir, const SmsRom *variants,
+                       int variant_count)
 {
     CG_MKDIR(out_dir);
     const char *pfx = cfg->output_prefix;
     size_t image_size = rom->size > 0x10000u ? 0x10000u : rom->size;
+    for (int v = 0; v < variant_count; ++v) {
+        size_t n = variants[v].size > 0x10000u ? 0x10000u : variants[v].size;
+        if (n > image_size) image_size = n;
+    }
     char path[600];
 
     snprintf(path, sizeof path, "%s/%s_step.h", out_dir, pfx);
@@ -1023,46 +1068,45 @@ void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
         "    switch (s->pc) {\n",
         pfx, pfx, pfx, rom->crc32, pfx, (unsigned)image_size, pfx);
 
+    const SmsRom *images[9];
+    images[0] = rom;
+    for (int v = 0; v < variant_count; ++v) images[v + 1] = &variants[v];
+
     unsigned emitted = 0;
+    unsigned alternatives = 0;
     for (size_t a = 0; a < image_size; ++a) {
-        Z80Insn in;
-        int n = z80_decode(rom->data + a, image_size - a, (uint16_t)a, &in);
-        if (n <= 0 || in.illegal) continue;
+        Z80Insn decoded[9];
+        int unique_count = 0;
+        for (int v = 0; v <= variant_count; ++v) {
+            const SmsRom *img = images[v];
+            size_t nbytes = img->size > 0x10000u ? 0x10000u : img->size;
+            if (a >= nbytes) continue;
+            Z80Insn in;
+            int n = z80_decode(img->data + a, nbytes - a, (uint16_t)a, &in);
+            if (n <= 0 || in.illegal) continue;
+            bool duplicate = false;
+            for (int u = 0; u < unique_count; ++u) {
+                if (flat_same_bytes(&decoded[u], &in)) { duplicate = true; break; }
+            }
+            if (!duplicate) decoded[unique_count++] = in;
+        }
+        if (unique_count == 0) continue;
         uint16_t addr = (uint16_t)a;
-        uint16_t next = (uint16_t)(addr + in.length);
-        fprintf(o, "    case 0x%04X: { /* %s */\n", addr, in.text);
+        fprintf(o, "    case 0x%04X: { /* %s", addr, decoded[0].text);
+        if (unique_count > 1) fprintf(o, " (+%d variant%s)", unique_count - 1,
+                                      unique_count == 2 ? "" : "s");
+        fprintf(o, " */\n");
         /* Genesis uploads its sound program into RAM while the Z80 is reset,
          * and some carts briefly run bootstrap/partial images before the final
-         * driver is present. Guard every compiled entry against the live bytes:
-         * a different cartridge revision, incomplete upload, or self-modified
-         * instruction takes the host's explicit interpreter fallback. This is
-         * still AOT execution on the matched path (no runtime decode). */
-        fprintf(o, "        if (");
-        for (unsigned bi = 0; bi < in.length; ++bi) {
-            if (bi) fprintf(o, " || ");
-            fprintf(o, "sms_read8(0x%04X) != 0x%02X", (uint16_t)(addr + bi),
-                    in.raw[bi]);
-        }
-        fprintf(o, ") { sms_dispatch_miss(0x%04X); return; }\n", addr);
-        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + %d) & 0x7f));\n",
-                in.prefix == Z80_PFX_NONE ? 1 : 2);
-        fprintf(o, "        s->pc = 0x%04X;\n", next);
-
-        if (flat_is_repeat_block(&in)) {
-            emit_flat_repeat(o, &in, addr, next);
-        } else {
-            int base = cyc_base(&in);
-            if (base > 0) fprintf(o, "        s->cyc += %d;\n", base);
-            if (in.is_halt) {
-                fprintf(o, "        s->halted = true;\n");
-            } else if (in.cf == Z80_CF_NONE) {
-                emit_op(o, &in);
-            } else {
-                emit_flat_cf(o, &in, next);
-            }
-        }
-        fprintf(o, "        return;\n    }\n");
+         * driver is present. Guard every compiled alternative against the live
+         * bytes. A different revision, incomplete upload, or uncaptured
+         * self-modified instruction takes the host's explicit interpreter
+         * fallback. Matching paths perform no runtime opcode decode. */
+        for (int u = 0; u < unique_count; ++u)
+            emit_flat_match(o, &decoded[u], addr);
+        fprintf(o, "        sms_dispatch_miss(0x%04X);\n        return;\n    }\n", addr);
         emitted++;
+        alternatives += (unsigned)(unique_count - 1);
     }
 
     fprintf(o,
@@ -1073,6 +1117,6 @@ void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
         "}\n");
     fclose(o);
 
-    printf("[cg_flat] wrote %u instruction entries (%zu-byte image) to %s/%s_step.{c,h}\n",
-           emitted, image_size, out_dir, pfx);
+    printf("[cg_flat] wrote %u instruction entries with %u byte-sequence variants (%zu-byte image) to %s/%s_step.{c,h}\n",
+           emitted, alternatives, image_size, out_dir, pfx);
 }

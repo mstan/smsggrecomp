@@ -28,4 +28,5 @@ void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg,
  * and decode are removed from runtime. Every byte offset in the input image is
  * emitted as a possible PC so computed branches need no profile manifest. */
 void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
-                       const char *out_dir);
+                       const char *out_dir, const SmsRom *variants,
+                       int variant_count);
