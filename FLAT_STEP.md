@@ -33,7 +33,8 @@ generated case keeps the opcode statically decoded and reads the live immediate
 or indexed displacement at execution time. This avoids treating ordinary
 operand changes as new code.
 
-The host supplies the normal `sms_runtime.h` bus functions and `Z80State`. If
+The host consumes `z80-recomp-core` and supplies its `sms_runtime.h` bus
+functions around the shared `Z80State`. If
 it already defines a symbol named `call_by_address`, compile with
 `SMS_RUNTIME_NO_CALL_BY_ADDRESS` to omit the function-form runtime declaration.
 

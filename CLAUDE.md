@@ -21,6 +21,7 @@ nesrecomp model), each tagged with its platform:
 F:\Projects\smsggrecomp\              ← workspace (NOT a git repo)
 ├── smsggrecomp\                      ← THIS engine repo (git)
 │   ├── PRINCIPLES.md                 ← rules; READ FIRST
+│   ├── external\z80-recomp-core\     ← shared state/semantic core submodule
 │   ├── CLAUDE.md / README.md / DEBUG.md / STATUS.md
 │   ├── recompiler\src\               ← C tool; builds SmsRecomp.exe
 │   │   ├── main_sms.c                ← entry            (ROM phase)
@@ -31,8 +32,8 @@ F:\Projects\smsggrecomp\              ← workspace (NOT a git repo)
 │   │   ├── game_config.{c,h}         ← game.toml schema (ROM phase)
 │   │   └── toml.{c,h}                ← vendored TOML parser
 │   ├── runner\                       ← SHARED ENGINE
-│   │   ├── include\sms_runtime.h     ← Z80State, bus/IO, globals      ✓
-│   │   ├── include\z80_ops.h         ← flag/ALU semantic core         ✓ tested
+│   │   ├── include\sms_runtime.h     ← compatibility forwarder to core
+│   │   ├── include\z80_ops.h         ← compatibility forwarder to core
 │   │   ├── video\sms_vdp.*           ← VDP (mode 4 + GG palette)  (ROM phase)
 │   │   ├── audio\sn76489.*           ← clean-room PSG (+ GG stereo)   ✓ vendored
 │   │   ├── external\superzazu\       ← MIT Z80 interpreter            ✓

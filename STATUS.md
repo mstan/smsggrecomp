@@ -20,7 +20,7 @@ not two repos. No `ggrecomp`.
 | Clean-room SN76489 PSG | `runner/audio/sn76489.{c,h}` | wired + verified — Z80-clocked, stereo, plays Sonic 1 SMS music (see PSG audio §) |
 | **SMS/GG ROM parser** | `recompiler/src/rom_parser.{c,h}` | TMR SEGA footer, region→platform, size, CRC32, Sega/Codemasters mapper |
 | **Z80 instruction decoder** | `recompiler/src/z80_decoder.{c,h}` | `tests/z80_decoder_selftest.c` — ALL PASS (length/prefix/CF/target across base, CB, ED, DD/FD, DDCB) |
-| **Z80 semantic core** (flags/ALU/rotates/DAA) | `runner/include/z80_ops.h` + `sms_runtime.h` | `tests/z80_ops_selftest.c` — ALL PASS; logic ported from superzazu |
+| **Z80 semantic core** (flags/ALU/rotates/DAA) | `external/z80-recomp-core/include/` | `tests/z80_ops_selftest.c` — ALL PASS; shared with Genesis, logic ported from superzazu |
 | **Function finder + tracer** | `recompiler/src/function_finder.{c,h}` | `tests/frontend_selftest.c` — ALL PASS (synthetic ROM → decode → discover entries transitively + internal labels) |
 
 The genuinely hard, correctness-critical CPU front-end (decode + flag
