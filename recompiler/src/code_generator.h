@@ -21,3 +21,12 @@ void cg_probe(const SmsRom *rom, const FuncList *fl);
  * No stubs: an untranslatable opcode aborts generation (PRINCIPLES #12). */
 void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg,
              const char *out_dir);
+
+/* Emit a flat-address-space, one-instruction-per-call AOT backend. This is the
+ * scheduler-friendly form used by coprocessors such as the Mega Drive Z80:
+ * the host retains control at every instruction boundary while opcode fetch
+ * and decode are removed from runtime. Every byte offset in the input image is
+ * emitted as a possible PC so computed branches need no profile manifest. */
+void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
+                       const char *out_dir, const SmsRom *variants,
+                       int variant_count);

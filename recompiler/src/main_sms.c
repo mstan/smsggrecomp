@@ -73,14 +73,25 @@ static int manifest_seed(const SmsRom *rom, FuncList *fl, const char *path){
 int main(int argc, char **argv){
     const char *rom_arg = NULL;
     const char *game_toml = NULL;
+    bool flat_step = false;
+    const char *flat_variant_paths[8];
+    int flat_variant_count = 0;
 
     for (int i=1;i<argc;i++){
         if (strcmp(argv[i],"--game")==0 && i+1<argc) game_toml = argv[++i];
+        else if (strcmp(argv[i],"--flat-step")==0) flat_step = true;
+        else if (strcmp(argv[i],"--flat-step-variant")==0 && i+1<argc) {
+            if (flat_variant_count >= 8) {
+                fprintf(stderr,"[SmsRecomp] at most 8 --flat-step-variant images are supported\n");
+                return 2;
+            }
+            flat_variant_paths[flat_variant_count++] = argv[++i];
+        }
         else if (argv[i][0] != '-') rom_arg = argv[i];
         else { fprintf(stderr,"[SmsRecomp] unknown arg: %s\n", argv[i]); }
     }
     if (!game_toml){
-        fprintf(stderr,"usage: SmsRecomp [<rom>] --game <game.toml>\n");
+        fprintf(stderr,"usage: SmsRecomp [<rom>] --game <game.toml> [--flat-step [--flat-step-variant <image>]...]\n");
         return 2;
     }
 
@@ -109,6 +120,24 @@ int main(int argc, char **argv){
         fprintf(stderr,"[SmsRecomp] NOTE: game.toml platform=%s but ROM region implies %s\n",
                 cfg.platform==SMS_PLATFORM_GG?"gg":"sms",
                 rom.platform==SMS_PLATFORM_GG?"gg":"sms");
+    }
+
+    if (flat_step) {
+        SmsRom variants[8];
+        int loaded = 0;
+        for (; loaded < flat_variant_count; ++loaded) {
+            if (!rom_parse(flat_variant_paths[loaded], &variants[loaded])) {
+                while (loaded > 0) rom_free(&variants[--loaded]);
+                rom_free(&rom);
+                return 1;
+            }
+        }
+        char dir[260]; dirname_of(game_toml, dir, sizeof(dir));
+        char gendir[300]; snprintf(gendir, sizeof(gendir), "%sgenerated", dir);
+        cg_emit_flat_step(&rom, &cfg, gendir, variants, loaded);
+        while (loaded > 0) rom_free(&variants[--loaded]);
+        rom_free(&rom);
+        return 0;
     }
 
     FuncList fl; funclist_init(&fl);

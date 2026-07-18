@@ -47,6 +47,9 @@ The recompiler (`recompiler/src/`) decodes every reachable Z80 instruction in
 the ROM and emits equivalent C. Each Z80 subroutine becomes a C function
 operating on a shared `Z80State` (AF, BC, DE, HL, IX, IY, SP, PC, the shadow
 set, I/R, flags) and the same 64 KB address space + paged ROM as the original.
+The state contract and verified instruction semantics come from the shared
+[`z80-recomp-core`](https://github.com/mstan/z80-recomp-core) submodule, also
+consumed by Sega Genesis Recomp's sound-CPU backend.
 **The rest of the machine is not recompiled** — VDP rendering, the SN76489
 PSG, controller/system ports, and the Sega/Codemasters mapper all run in the
 runner. Same model as the sibling projects: recompile the CPU, emulate the
@@ -61,6 +64,9 @@ Key pieces:
 - **`code_generator.c`** — Z80 → C translation, one C function per
   subroutine, computed jumps routed through `call_by_address`, per-
   instruction T-state accumulation for line/frame timing.
+- **[`FLAT_STEP.md`](FLAT_STEP.md)** — optional one-instruction-per-call
+  output for hosts that use the Z80 as an interleaved coprocessor, including
+  the Genesis sound CPU experiment.
 - **`function_finder.c`** — static reachability from the reset/IRQ/NMI/RST
   vectors plus `[functions].extra` seeds and jump tables.
 
@@ -70,7 +76,8 @@ Key pieces:
 |-----------|---------|
 | `recompiler/src/` | The recompiler tool — analyzes the ROM, emits native C. Builds `SmsRecomp.exe`. |
 | `runner/` | Shared clean-room runtime: Z80 interpreter (hybrid fallback), VDP, SN76489 PSG, I/O, mapper, SDL2 host, glue. |
-| `runner/include/sms_runtime.h` | Shared interface: `Z80State`, bus/IO access, runtime globals. |
+| `external/z80-recomp-core/` | Shared `Z80State`, generated host ABI, and verified instruction semantics. |
+| `runner/include/` | Compatibility forwarding headers for existing generated SMS/GG source. |
 | `runner/external/superzazu/` | Vendored MIT Z80 core — interpreter + codegen reference. |
 | `tools/` | Platform-agnostic probes and the release packager. |
 | `docs/` | Design notes. |
@@ -82,6 +89,12 @@ Targets **Windows (MSVC / MinGW)**, **macOS**, and **Linux**. SDL2 handles
 windowing, rendering, audio, and gamepads.
 
 ## Building the recompiler
+
+Clone recursively, or initialize the shared Z80 core before building:
+
+```bash
+git submodule update --init --recursive
+```
 
 ```bash
 cd recompiler

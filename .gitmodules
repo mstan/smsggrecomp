@@ -1,0 +1,3 @@
+[submodule "external/z80-recomp-core"]
+	path = external/z80-recomp-core
+	url = ../z80-recomp-core.git

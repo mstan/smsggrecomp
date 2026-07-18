@@ -888,3 +888,309 @@ void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg, const
            emitted, out_dir, pfx, pfx);
 }
 
+/* ======================================================================== *
+ *  Flat single-step AOT backend                                            *
+ * ======================================================================== *
+ *
+ * Function-form recompilation is ideal when the Z80 owns the whole machine:
+ * generated calls/gotos can run until sms_tick reaches a video event. A
+ * coprocessor host instead needs instruction-boundary control to interleave
+ * another CPU and shared devices. This emitter keeps the verified decoder,
+ * timing table, and semantic helpers above, but makes PC and the guest stack
+ * explicit and returns after exactly one instruction.
+ *
+ * Every byte in the flat image is a legal dispatch entry. That deliberately
+ * trades generated-code size for correctness with computed jumps: no profile
+ * manifest or guessed function boundary is needed, and runtime performs no
+ * opcode fetch/decode. The host should validate the uploaded image CRC before
+ * enabling this backend and retain an interpreter fallback for a different or
+ * self-modified driver image. */
+
+static bool flat_is_repeat_block(const Z80Insn *in)
+{
+    if (in->prefix != Z80_PFX_ED) return false;
+    uint8_t op = in->opcode;
+    return (op >= 0xB0 && op <= 0xB3) || (op >= 0xB8 && op <= 0xBB);
+}
+
+static void emit_flat_repeat(FILE *o, const Z80Insn *in, uint16_t addr,
+                             uint16_t next)
+{
+    int grp = in->opcode & 3;
+    const char *contc = (grp == 0) ? "z80_bc(s) != 0"
+                      : (grp == 1) ? "z80_bc(s) != 0 && !(s->f & Z80_FLAG_Z)"
+                                   : "s->b != 0";
+    emit_block_body(o, in->opcode, "        ");
+    fprintf(o, "        if (%s) { s->cyc += 21; s->pc = 0x%04X; }\n",
+            contc, addr);
+    fprintf(o, "        else { s->cyc += 16; s->pc = 0x%04X; }\n", next);
+}
+
+static void emit_flat_cf(FILE *o, const Z80Insn *in, uint16_t next)
+{
+    switch (in->cf) {
+    case Z80_CF_RET:
+        if (in->prefix == Z80_PFX_ED)
+            fprintf(o, "        s->iff1 = s->iff2;\n");
+        fprintf(o, "        s->pc = sms_read16(s->sp);\n");
+        fprintf(o, "        s->sp = (uint16_t)(s->sp + 2);\n");
+        break;
+
+    case Z80_CF_RET_COND: {
+        int cc = (in->opcode >> 3) & 7;
+        fprintf(o, "        if (%s) { s->cyc += 6; s->pc = sms_read16(s->sp); s->sp = (uint16_t)(s->sp + 2); }\n",
+                cond(cc));
+        break;
+    }
+
+    case Z80_CF_JUMP:
+        if (in->has_target) {
+            fprintf(o, "        s->pc = 0x%04X;\n", in->target);
+        } else {
+            const char *idx = (in->prefix == Z80_PFX_DD) ? "s->ix"
+                            : (in->prefix == Z80_PFX_FD) ? "s->iy"
+                                                        : "z80_hl(s)";
+            fprintf(o, "        s->pc = %s;\n", idx);
+        }
+        break;
+
+    case Z80_CF_JUMP_COND:
+        if (in->prefix == Z80_PFX_NONE && in->opcode == 0x10) {
+            fprintf(o, "        s->b = (uint8_t)(s->b - 1);\n");
+            fprintf(o, "        if (s->b != 0) { s->cyc += 5; s->pc = 0x%04X; }\n",
+                    in->target);
+        } else if (in->prefix == Z80_PFX_NONE && (in->opcode & 0xE7) == 0x20) {
+            fprintf(o, "        if (%s) { s->cyc += 5; s->pc = 0x%04X; }\n",
+                    cond((in->opcode >> 3) & 3), in->target);
+        } else {
+            fprintf(o, "        if (%s) s->pc = 0x%04X;\n",
+                    cond((in->opcode >> 3) & 7), in->target);
+        }
+        break;
+
+    case Z80_CF_CALL:
+        fprintf(o, "        s->sp = (uint16_t)(s->sp - 2); sms_write16(s->sp, 0x%04X); s->pc = 0x%04X;\n",
+                next, in->target);
+        break;
+
+    case Z80_CF_CALL_COND: {
+        int cc = (in->opcode >> 3) & 7;
+        fprintf(o, "        if (%s) { s->cyc += 7; s->sp = (uint16_t)(s->sp - 2); sms_write16(s->sp, 0x%04X); s->pc = 0x%04X; }\n",
+                cond(cc), next, in->target);
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
+static void emit_flat_body(FILE *o, const Z80Insn *in, uint16_t addr)
+{
+    uint16_t next = (uint16_t)(addr + in->length);
+    fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + %d) & 0x7f));\n",
+            in->prefix == Z80_PFX_NONE ? 1 : 2);
+    fprintf(o, "        s->pc = 0x%04X;\n", next);
+
+    if (flat_is_repeat_block(in)) {
+        emit_flat_repeat(o, in, addr, next);
+    } else {
+        int base = cyc_base(in);
+        if (base > 0) fprintf(o, "        s->cyc += %d;\n", base);
+        if (in->is_halt) {
+            fprintf(o, "        s->halted = true;\n");
+        } else if (in->cf == Z80_CF_NONE) {
+            emit_op(o, in);
+        } else {
+            emit_flat_cf(o, in, next);
+        }
+    }
+}
+
+static bool flat_same_bytes(const Z80Insn *a, const Z80Insn *b)
+{
+    return a->length == b->length && memcmp(a->raw, b->raw, a->length) == 0;
+}
+
+static void emit_flat_match(FILE *o, const Z80Insn *in, uint16_t addr)
+{
+    fprintf(o, "        if (");
+    for (unsigned bi = 0; bi < in->length; ++bi) {
+        if (bi) fprintf(o, " && ");
+        fprintf(o, "sms_read8(0x%04X) == 0x%02X", (uint16_t)(addr + bi),
+                in->raw[bi]);
+    }
+    fprintf(o, ") {\n");
+    emit_flat_body(o, in, addr);
+    fprintf(o, "            return;\n        }\n");
+}
+
+/* Some Genesis sound drivers self-modify operand bytes in otherwise-stable
+ * instruction templates (notably loop counts and indexed sample-table
+ * displacements). The opcode is still statically decoded; read only the
+ * mutable operand at runtime so every new value does not become an interpreter
+ * miss. Return true when a live-operand case was emitted. */
+static bool emit_flat_live_operands(FILE *o, const Z80Insn *in, uint16_t addr)
+{
+    if (in->prefix == Z80_PFX_NONE && in->length == 3 &&
+        (in->opcode == 0x22 || in->opcode == 0x2A ||
+         in->opcode == 0x32 || in->opcode == 0x3A)) {
+        fprintf(o, "        if (sms_read8(0x%04X) == 0x%02X) {\n", addr,
+                in->opcode);
+        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + 1) & 0x7f));\n");
+        fprintf(o, "        s->pc = 0x%04X;\n", (uint16_t)(addr + 3));
+        fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
+        fprintf(o, "        uint16_t nn = sms_read16(0x%04X);\n",
+                (uint16_t)(addr + 1));
+        switch (in->opcode) {
+        case 0x22: fprintf(o, "        sms_write16(nn, z80_hl(s));\n"); break;
+        case 0x2A: fprintf(o, "        z80_set_hl(s, sms_read16(nn));\n"); break;
+        case 0x32: fprintf(o, "        sms_write8(nn, s->a);\n"); break;
+        case 0x3A: fprintf(o, "        s->a = sms_read8(nn);\n"); break;
+        }
+        fprintf(o, "            return;\n        }\n");
+        return true;
+    }
+
+    if (in->prefix == Z80_PFX_NONE && (in->opcode & 0xC7) == 0x06 &&
+        in->length == 2) {
+        int y = (in->opcode >> 3) & 7;
+        OpCtx c = {NULL, false, 0};
+        char value[40];
+        snprintf(value, sizeof value, "sms_read8(0x%04X)", (uint16_t)(addr + 1));
+        fprintf(o, "        if (sms_read8(0x%04X) == 0x%02X) {\n", addr,
+                in->opcode);
+        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + 1) & 0x7f));\n");
+        fprintf(o, "        s->pc = 0x%04X;\n", (uint16_t)(addr + 2));
+        fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
+        if (y == 6) fprintf(o, "        uint16_t ea = z80_hl(s);\n");
+        fprintf(o, "        %s\n", r8w(&c, y, value));
+        fprintf(o, "            return;\n        }\n");
+        return true;
+    }
+
+    if ((in->prefix == Z80_PFX_DD || in->prefix == Z80_PFX_FD) &&
+        in->uses_disp && in->length == 3 &&
+        (in->opcode >> 6) == 2 && (in->opcode & 7) == 6) {
+        const char *idx = in->prefix == Z80_PFX_DD ? "s->ix" : "s->iy";
+        int alu = (in->opcode >> 3) & 7;
+        fprintf(o, "        if (sms_read8(0x%04X) == 0x%02X && sms_read8(0x%04X) == 0x%02X) {\n",
+                addr, in->raw[0], (uint16_t)(addr + 1), in->opcode);
+        fprintf(o, "        s->r = (uint8_t)((s->r & 0x80) | ((s->r + 2) & 0x7f));\n");
+        fprintf(o, "        s->pc = 0x%04X;\n", (uint16_t)(addr + 3));
+        fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
+        fprintf(o, "        uint16_t ea = (uint16_t)(%s + (int8_t)sms_read8(0x%04X));\n",
+                idx, (uint16_t)(addr + 2));
+        emit_alu(o, alu, "sms_read8(ea)");
+        fprintf(o, "            return;\n        }\n");
+        return true;
+    }
+    return false;
+}
+
+void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
+                       const char *out_dir, const SmsRom *variants,
+                       int variant_count)
+{
+    CG_MKDIR(out_dir);
+    const char *pfx = cfg->output_prefix;
+    size_t image_size = rom->size > 0x10000u ? 0x10000u : rom->size;
+    for (int v = 0; v < variant_count; ++v) {
+        size_t n = variants[v].size > 0x10000u ? 0x10000u : variants[v].size;
+        if (n > image_size) image_size = n;
+    }
+    char path[600];
+
+    snprintf(path, sizeof path, "%s/%s_step.h", out_dir, pfx);
+    FILE *h = fopen(path, "w");
+    if (!h) { fprintf(stderr, "[cg_flat] cannot write %s\n", path); exit(1); }
+    fprintf(h,
+        "/* %s_step.h - GENERATED by SmsRecomp --flat-step. DO NOT EDIT. */\n"
+        "#pragma once\n"
+        "#include <stdint.h>\n"
+        "#include \"sms_runtime.h\"\n"
+        "#include \"z80_ops.h\"\n\n"
+        "extern const uint32_t %s_code_crc32;\n"
+        "extern const uint32_t %s_code_size;\n"
+        "void %s_step(void);\n",
+        pfx, pfx, pfx, pfx);
+    fclose(h);
+
+    snprintf(path, sizeof path, "%s/%s_step.c", out_dir, pfx);
+    FILE *o = fopen(path, "w");
+    if (!o) { fprintf(stderr, "[cg_flat] cannot write %s\n", path); exit(1); }
+    fprintf(o,
+        "/* %s_step.c - GENERATED by SmsRecomp --flat-step. DO NOT EDIT.\n"
+        " * Flat Z80 AOT dispatch: one decoded instruction per call. */\n"
+        "#include \"%s_step.h\"\n\n"
+        "const uint32_t %s_code_crc32 = 0x%08Xu;\n"
+        "const uint32_t %s_code_size = 0x%X;\n\n"
+        "void %s_step(void)\n"
+        "{\n"
+        "    Z80State *s = &g_z80;\n"
+        "    switch (s->pc) {\n",
+        pfx, pfx, pfx, rom->crc32, pfx, (unsigned)image_size, pfx);
+
+    const SmsRom *images[9];
+    images[0] = rom;
+    for (int v = 0; v < variant_count; ++v) images[v + 1] = &variants[v];
+
+    unsigned emitted = 0;
+    unsigned alternatives = 0;
+    for (size_t a = 0; a < image_size; ++a) {
+        Z80Insn decoded[9];
+        int unique_count = 0;
+        for (int v = 0; v <= variant_count; ++v) {
+            const SmsRom *img = images[v];
+            size_t nbytes = img->size > 0x10000u ? 0x10000u : img->size;
+            if (a >= nbytes) continue;
+            Z80Insn in;
+            int n = z80_decode(img->data + a, nbytes - a, (uint16_t)a, &in);
+            if (n <= 0 || in.illegal) continue;
+            bool duplicate = false;
+            for (int u = 0; u < unique_count; ++u) {
+                if (flat_same_bytes(&decoded[u], &in)) { duplicate = true; break; }
+            }
+            if (!duplicate) decoded[unique_count++] = in;
+        }
+        if (unique_count == 0) continue;
+        uint16_t addr = (uint16_t)a;
+        fprintf(o, "    case 0x%04X: { /* %s", addr, decoded[0].text);
+        if (unique_count > 1) fprintf(o, " (+%d variant%s)", unique_count - 1,
+                                      unique_count == 2 ? "" : "s");
+        fprintf(o, " */\n");
+        /* Genesis uploads its sound program into RAM while the Z80 is reset,
+         * and some carts briefly run bootstrap/partial images before the final
+         * driver is present. Guard every compiled alternative against the live
+         * bytes. A different revision, incomplete upload, or uncaptured
+         * self-modified instruction takes the host's explicit interpreter
+         * fallback. Matching paths perform no runtime opcode decode. */
+        bool same_shape = true;
+        for (int u = 1; u < unique_count; ++u) {
+            if (decoded[u].prefix != decoded[0].prefix ||
+                decoded[u].opcode != decoded[0].opcode ||
+                decoded[u].length != decoded[0].length) {
+                same_shape = false;
+                break;
+            }
+        }
+        if (!(same_shape && emit_flat_live_operands(o, &decoded[0], addr))) {
+            for (int u = 0; u < unique_count; ++u)
+                emit_flat_match(o, &decoded[u], addr);
+        }
+        fprintf(o, "        sms_dispatch_miss(0x%04X);\n        return;\n    }\n", addr);
+        emitted++;
+        alternatives += (unsigned)(unique_count - 1);
+    }
+
+    fprintf(o,
+        "    default:\n"
+        "        sms_dispatch_miss(s->pc);\n"
+        "        return;\n"
+        "    }\n"
+        "}\n");
+    fclose(o);
+
+    printf("[cg_flat] wrote %u instruction entries with %u byte-sequence variants (%zu-byte image) to %s/%s_step.{c,h}\n",
+           emitted, alternatives, image_size, out_dir, pfx);
+}
