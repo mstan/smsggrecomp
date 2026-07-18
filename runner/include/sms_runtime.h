@@ -85,7 +85,9 @@ extern Z80State g_z80;
 /* Dispatch an arbitrary Z80 address: generated function if known, else hybrid
  * interpreter fallback (and logs a dispatch miss). Returns when the called
  * routine RETs. Used for computed CALL/JP targets. */
+#ifndef SMS_RUNTIME_NO_CALL_BY_ADDRESS
 void call_by_address(uint16_t addr);
+#endif
 
 /* HALT: run the machine (advancing time / servicing interrupts) until an
  * interrupt is taken, then return so the generated code continues after the

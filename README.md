@@ -61,6 +61,9 @@ Key pieces:
 - **`code_generator.c`** — Z80 → C translation, one C function per
   subroutine, computed jumps routed through `call_by_address`, per-
   instruction T-state accumulation for line/frame timing.
+- **[`FLAT_STEP.md`](FLAT_STEP.md)** — optional one-instruction-per-call
+  output for hosts that use the Z80 as an interleaved coprocessor, including
+  the Genesis sound CPU experiment.
 - **`function_finder.c`** — static reachability from the reset/IRQ/NMI/RST
   vectors plus `[functions].extra` seeds and jump tables.
 

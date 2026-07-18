@@ -73,14 +73,16 @@ static int manifest_seed(const SmsRom *rom, FuncList *fl, const char *path){
 int main(int argc, char **argv){
     const char *rom_arg = NULL;
     const char *game_toml = NULL;
+    bool flat_step = false;
 
     for (int i=1;i<argc;i++){
         if (strcmp(argv[i],"--game")==0 && i+1<argc) game_toml = argv[++i];
+        else if (strcmp(argv[i],"--flat-step")==0) flat_step = true;
         else if (argv[i][0] != '-') rom_arg = argv[i];
         else { fprintf(stderr,"[SmsRecomp] unknown arg: %s\n", argv[i]); }
     }
     if (!game_toml){
-        fprintf(stderr,"usage: SmsRecomp [<rom>] --game <game.toml>\n");
+        fprintf(stderr,"usage: SmsRecomp [<rom>] --game <game.toml> [--flat-step]\n");
         return 2;
     }
 
@@ -109,6 +111,14 @@ int main(int argc, char **argv){
         fprintf(stderr,"[SmsRecomp] NOTE: game.toml platform=%s but ROM region implies %s\n",
                 cfg.platform==SMS_PLATFORM_GG?"gg":"sms",
                 rom.platform==SMS_PLATFORM_GG?"gg":"sms");
+    }
+
+    if (flat_step) {
+        char dir[260]; dirname_of(game_toml, dir, sizeof(dir));
+        char gendir[300]; snprintf(gendir, sizeof(gendir), "%sgenerated", dir);
+        cg_emit_flat_step(&rom, &cfg, gendir);
+        rom_free(&rom);
+        return 0;
     }
 
     FuncList fl; funclist_init(&fl);
