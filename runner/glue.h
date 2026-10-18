@@ -90,5 +90,13 @@ double   glue_frame_rate(void);
 uint64_t glue_frame_count(void);
 int      glue_dispatch_miss_count(void);
 size_t   glue_rom_size(void);
+uint32_t glue_rom_crc32(void);
+
+/* Deterministic boundary observer, after frame completion and scripted input,
+ * before the next guest instruction. Nonzero requests a clean run stop. */
+void glue_set_boundary_callback(int (*cb)(uint64_t frame));
+bool glue_write_report(const char *path);
+/* Native viewport PNG plus WRAM/VRAM/CRAM/register planes and execution JSON. */
+bool glue_capture(const char *prefix);
 
 #endif /* GLUE_H */

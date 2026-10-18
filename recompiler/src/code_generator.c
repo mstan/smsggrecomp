@@ -318,6 +318,12 @@ static int target_runtime_bank_count(uint16_t T){
     return n;
 }
 static const char *name_for_target(uint16_t T){
+    /* A single discovered variant does not prove the live mapping. A later
+     * profile can expose an address used by several banks; even before that,
+     * an unobserved bank must fall back rather than execute another bank's C.
+     * Keep all pageable call/tail targets behind the generated live-bank
+     * dispatch. Only the mapper's fixed first 1 KiB permits a direct call. */
+    if (T >= 0x0400) return NULL;
     /* A bank-multiplexed address must dispatch on the LIVE slot bank at runtime,
      * not on the bank our static walk happened to infer at this site: the same
      * call site can be reached with different banks, so a direct call to one
@@ -807,7 +813,7 @@ static void write_dispatch(const char *path, const char *pfx, const FuncList *fl
         int vidx[64]; int nv=0;
         for (int j=0;j<fl->count && nv<64;j++)
             if (fl->items[j].is_entry && fl->items[j].addr==a) vidx[nv++]=j;
-        if (nv == 1){
+        if (nv == 1 && a < 0x0400){
             fprintf(d,"    case 0x%04X: %s(); return;\n", a, fl->items[vidx[0]].name);
         } else {
             /* runtime bank for a variant: explicit bank, or the slot's default
@@ -830,7 +836,7 @@ static void write_dispatch(const char *path, const char *pfx, const FuncList *fl
     fclose(d);
 }
 
-static void write_layout(const char *path, const char *pfx, const GameConfig *cfg){
+static void write_layout(const char *path, const char *pfx, const GameConfig *cfg, const SmsRom *rom){
     FILE *l=fopen(path,"w");
     if (!l){ fprintf(stderr,"[cg_emit] cannot write %s\n", path); exit(1); }
     fprintf(l,
@@ -844,7 +850,12 @@ static void write_layout(const char *path, const char *pfx, const GameConfig *cf
     if (cfg->game_mode_addr     != GC_ADDR_UNSET) fprintf(l,"    .game_mode     = 0x%04X,\n", cfg->game_mode_addr);
     if (cfg->vblank_count_addr  != GC_ADDR_UNSET) fprintf(l,"    .vblank_count  = 0x%04X,\n", cfg->vblank_count_addr);
     if (cfg->player_object_addr != GC_ADDR_UNSET) fprintf(l,"    .player_object = 0x%04X,\n", cfg->player_object_addr);
-    fprintf(l,"};\n#endif\n");
+    fprintf(l,"};\n#include \"game_spec.h\"\n"
+              "const GameSpec g_game_spec = {\n"
+              " .display_name=\"%s\", .short_name=\"%s\",\n"
+              " .expected_rom_crc32=0x%08Xu, .expected_rom_size=%uu,\n"
+              " .platform=%s\n};\n#endif\n",pfx,pfx,rom->crc32,(unsigned)rom->size,
+              cfg->platform==SMS_PLATFORM_GG?"GAME_PLATFORM_GG":"GAME_PLATFORM_SMS");
     fclose(l);
 }
 
@@ -881,7 +892,7 @@ void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg, const
     write_dispatch(path, pfx, fl);
 
     snprintf(path,sizeof path,"%s/%s_layout.c", out_dir, pfx);
-    write_layout(path, pfx, cfg);
+    write_layout(path, pfx, cfg, rom);
 
     free(ents);
     printf("[cg_emit] wrote %d functions to %s/%s_{full,dispatch,layout}.c (+%s_funcs.h)\n",

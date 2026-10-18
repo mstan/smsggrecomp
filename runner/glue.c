@@ -20,6 +20,9 @@
 #include "external/superzazu/z80.h"
 #include "png_write.h"
 #include "audio/sn76489.h"
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+#include "game_spec.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +36,7 @@ uint64_t  g_frame_ic;   /* per-frame instruction count probe */
 
 static uint8_t  *g_rom;
 static size_t    g_rom_size;
+static uint32_t  g_rom_crc;
 static uint8_t   g_ram[0x2000];     /* 8 KB system RAM ($C000-$DFFF) */
 static int       g_bank[3] = {0,1,2};
 static bool      g_mapper_cm;        /* Codemasters mapper */
@@ -41,6 +45,7 @@ static bool      g_mapper_cm;        /* Codemasters mapper */
 static uint64_t  g_next_line_cyc;
 static uint64_t  g_frame;
 static uint64_t  g_frame_limit;
+static uint64_t  g_elapsed_cyc;
 static jmp_buf   g_quit_env;
 static bool      g_running;
 
@@ -61,6 +66,7 @@ static int       g_sync_maxdepth;
  * interpreter fallback vs the statically-recompiled code. */
 static uint64_t  g_hybrid_cyc;      /* Z80 cycles executed inside hybrid_interpret */
 static uint64_t  g_hybrid_calls;    /* number of hybrid invocations */
+static bool      g_interpreter_only;
 
 /* ---- frame dump ---- */
 static uint64_t  g_dump_frame = (uint64_t)-1;
@@ -100,6 +106,7 @@ static uint32_t  g_fb[SMS_SCREEN_W * SMS_SCREEN_H];
 
 /* ---- live per-frame callback (SDL host) ---- */
 static int (*g_frame_cb)(const uint32_t *fb, int w, int h);
+static int (*g_boundary_cb)(uint64_t frame);
 
 /* ---- platform + audio ----
  * g_is_gg gates the GG-only stereo register ($06). The PSG is advanced from
@@ -454,6 +461,8 @@ static void frame_completed(void){
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
     if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
+    if (g_boundary_cb && g_boundary_cb(g_frame) && g_running)
+        longjmp(g_quit_env, 1);
     if (g_audio_sink){
         /* Drain this frame's PSG output to the sink (interleaved stereo). The
          * PSG was advanced up to the current absolute cycle in advance_vdp(). */
@@ -675,6 +684,7 @@ static void take_irq(void){
 extern int g_diff_freeze;
 static void advance_vdp(uint64_t cyc){
     if (g_diff_freeze) return;     /* differential harness: VDP frozen during a test run */
+    g_elapsed_cyc = cyc;
     /* Keep the PSG in lockstep with the VDP on the same absolute timeline.
      * Only synthesise when a sink is listening (oracle/diff runs pay nothing).
      * Done before stepping lines so the just-finished frame's samples are
@@ -821,6 +831,7 @@ static void hybrid_interpret(uint16_t addr){
     g_hz.pc = addr;
     const uint64_t base = g_z80.cyc;     /* absolute time at entry */
     g_hz.cyc = 0;                        /* rebase: g_hz.cyc counts this call only */
+    g_hybrid_calls++;
     const uint16_t entry_sp = g_hz.sp;
     sms_enter(addr);                     /* record the hybrid target in the ring */
 
@@ -850,7 +861,11 @@ static void hybrid_interpret(uint16_t addr){
         }
         int cls = took_int ? 0 : hyb_cf_class(g_hz.pc);
         uint16_t sp0 = g_hz.sp;
+        uint64_t before = g_hz.cyc;
         z80_step(&g_hz); g_frame_ic++;
+        /* Account before advance_vdp: its frame limit can unwind this call. */
+        g_hybrid_cyc += g_hz.cyc - before;
+        mb_interp(addr, g_hz.cyc - before);
         advance_vdp(base + g_hz.cyc);
         g_sync_deadline = g_next_line_cyc;
         int dsp = (int16_t)(g_hz.sp - sp0);
@@ -874,8 +889,6 @@ static void hybrid_interpret(uint16_t addr){
      * it becomes eligible — not many instructions later at the next line. This
      * is the hybrid->native handoff half of the interrupt-sampling fix. */
     sms_set_sync_deadline();
-    g_hybrid_cyc += g_hz.cyc;            /* cycles this routine spent in the interpreter */
-    g_hybrid_calls++;
 }
 
 /* ============ differential function harness (invariant, timing-free) ============ *
@@ -1108,9 +1121,7 @@ void sms_dispatch_miss(uint16_t addr){
     }
 
     /* Robust fallback: interpret the routine to completion with live banking. */
-    uint64_t _c0 = g_z80.cyc;
     hybrid_interpret(addr);
-    mb_interp(addr, g_z80.cyc - _c0);
 }
 
 /* ====================== lifecycle ====================== */
@@ -1126,7 +1137,23 @@ bool glue_load_rom(const char *path){
     size_t got = fread(g_rom, 1, (size_t)sz, f);
     fclose(f);
     g_rom_size = got;
-    return got == (size_t)sz;
+    if (got != (size_t)sz) return false;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i=0; i<got; ++i){
+        crc ^= g_rom[i];
+        for (int b=0; b<8; ++b) crc = (crc>>1) ^ (0xEDB88320u & (0u-(crc&1u)));
+    }
+    g_rom_crc = ~crc;
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    if (g_rom_crc != g_game_spec.expected_rom_crc32 ||
+        got != g_game_spec.expected_rom_size){
+        fprintf(stderr, "[runner] ROM does not match this generated build (expected %08X, %u bytes)\n",
+                g_game_spec.expected_rom_crc32, g_game_spec.expected_rom_size);
+        free(g_rom); g_rom = NULL; g_rom_size = 0;
+        return false;
+    }
+#endif
+    return true;
 }
 
 void glue_init(bool is_gg, uint64_t frame_limit){
@@ -1138,6 +1165,8 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     g_next_line_cyc = SMS_CYC_PER_LINE;
     g_sync_deadline = SMS_CYC_PER_LINE;
     g_frame = 0;
+    g_elapsed_cyc = 0;
+    g_interpreter_only = false;
     g_frame_limit = frame_limit;
     g_miss_count = 0;
     free(g_miss_seen);
@@ -1156,6 +1185,7 @@ void glue_init(bool is_gg, uint64_t frame_limit){
 }
 
 void glue_run_interp(void){
+    g_interpreter_only = true;
     g_running = true;
     /* Reference CPU = superzazu over the shared glue bus/VDP/IO. */
     z80_init(&g_hz);
@@ -1195,9 +1225,9 @@ void glue_run(void){
     fprintf(stderr, "[exec] hybrid(interp): %llu calls, %llu of %llu Z80 cyc = "
             "%.3f%% interp / %.3f%% static\n",
             (unsigned long long)g_hybrid_calls,
-            (unsigned long long)g_hybrid_cyc, (unsigned long long)g_z80.cyc,
-            g_z80.cyc ? 100.0 * (double)g_hybrid_cyc / (double)g_z80.cyc : 0.0,
-            g_z80.cyc ? 100.0 * (double)(g_z80.cyc - g_hybrid_cyc) / (double)g_z80.cyc : 0.0);
+            (unsigned long long)g_hybrid_cyc, (unsigned long long)g_elapsed_cyc,
+            g_elapsed_cyc ? 100.0 * (double)g_hybrid_cyc / (double)g_elapsed_cyc : 0.0,
+            g_elapsed_cyc ? 100.0 * (double)(g_elapsed_cyc - g_hybrid_cyc) / (double)g_elapsed_cyc : 0.0);
     mmio_tally_dump();
 }
 
@@ -1255,5 +1285,44 @@ void     glue_set_pad1(uint8_t pressed){ g_pad1 = pressed; }
 void     glue_set_pad2(uint8_t pressed){ g_pad2 = pressed; }
 void     glue_set_input_cb(uint8_t (*cb)(uint64_t frame)){ g_input_cb = cb; }
 uint64_t glue_frame_count(void){ return g_frame; }
+uint32_t glue_rom_crc32(void){ return g_rom_crc; }
+void glue_set_boundary_callback(int (*cb)(uint64_t)){ g_boundary_cb = cb; }
+
+bool glue_write_report(const char *path){
+    FILE *f = fopen(path,"w");
+    if (!f) return false;
+    uint64_t interpreted = g_interpreter_only ? g_elapsed_cyc : g_hybrid_cyc;
+    fprintf(f,"{\"schema\":1,\"rom_crc32\":\"%08x\",\"rom_size\":%llu,"
+              "\"frame\":%llu,\"execution\":\"%s\",\"total_cycles\":%llu,"
+              "\"interpreted_cycles\":%llu,\"native_cycles\":%llu,"
+              "\"fallback_calls\":%llu,\"dispatch_misses\":%d,\"banks\":[%d,%d,%d]}\n",
+            g_rom_crc,(unsigned long long)g_rom_size,(unsigned long long)g_frame,
+            g_interpreter_only?"interpreter":"hybrid",(unsigned long long)g_elapsed_cyc,
+            (unsigned long long)interpreted,(unsigned long long)(g_elapsed_cyc-interpreted),
+            (unsigned long long)g_hybrid_calls,g_miss_count,g_bank[0],g_bank[1],g_bank[2]);
+    bool ok = !ferror(f); return fclose(f)==0 && ok;
+}
+
+static bool capture_bytes(const char *prefix,const char *suffix,const void *bytes,size_t n){
+    char path[1200];
+    if (snprintf(path,sizeof path,"%s%s",prefix,suffix) >= (int)sizeof path) return false;
+    FILE *f=fopen(path,"wb"); if (!f) return false;
+    bool ok=fwrite(bytes,1,n,f)==n; return fclose(f)==0 && ok;
+}
+
+bool glue_capture(const char *prefix){
+    char path[1200];
+    if (snprintf(path,sizeof path,"%s.png",prefix) >= (int)sizeof path) return false;
+    vdp_render_frame(g_fb);
+    const uint32_t *pixels=g_fb+(g_is_gg?24*SMS_SCREEN_W+48:0);
+    if (png_write_argb(path,pixels,g_is_gg?GG_SCREEN_W:SMS_SCREEN_W,
+                       g_is_gg?GG_SCREEN_H:SMS_SCREEN_H,SMS_SCREEN_W)) return false;
+    if (!capture_bytes(prefix,".wram",g_ram,sizeof g_ram) ||
+        !capture_bytes(prefix,".vram",g_vdp.vram,sizeof g_vdp.vram) ||
+        !capture_bytes(prefix,".cram",g_vdp.cram,sizeof g_vdp.cram) ||
+        !capture_bytes(prefix,".regs",g_vdp.reg,sizeof g_vdp.reg)) return false;
+    if (snprintf(path,sizeof path,"%s.json",prefix) >= (int)sizeof path) return false;
+    return glue_write_report(path);
+}
 int      glue_dispatch_miss_count(void){ return g_miss_count; }
 size_t   glue_rom_size(void){ return g_rom_size; }

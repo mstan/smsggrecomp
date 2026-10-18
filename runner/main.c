@@ -10,12 +10,17 @@
  * (DEBUG.md) layer on top of this core later.
  */
 #include "glue.h"
+#include "coverage_route.h"
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+#include "game_spec.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
+static bool g_automated_input;
 
 #ifdef SMS_HAVE_SDL
 #include "host_sdl.h"
@@ -24,7 +29,7 @@
  * request shutdown (glue.c then unwinds the run loop). */
 static int sdl_frame_cb(const uint32_t *fb, int w, int h){
     bool keep = host_present(fb, w, h);
-    glue_set_pad1(host_get_pad1());     /* push this frame's keyboard state to the CPU */
+    if (!g_automated_input) glue_set_pad1(host_get_pad1());
     return keep ? 0 : 1;
 }
 #endif
@@ -144,6 +149,7 @@ int main(int argc, char **argv){
     bool interp = false;       /* oracle: run the reference superzazu interpreter */
     const char *audio_wav = NULL;   /* dump PSG output to this WAV */
     bool mute = false;              /* suppress live SDL audio (window build) */
+    const char *route = NULL, *report = NULL;
 #ifdef SMS_CYC_WATCH
     const char *cyc_watch_file = NULL; uint16_t cyc_watch_addr = 0;
 #endif
@@ -166,21 +172,29 @@ int main(int argc, char **argv){
             cyc_watch_addr = (uint16_t)strtoul(argv[++i],NULL,0); cyc_watch_file = argv[++i]; }
 #endif
         else if (strcmp(argv[i],"--press")==0 && i+1<argc) press_add(argv[++i]);
+        else if (strcmp(argv[i],"--route")==0 && i+1<argc) route=argv[++i];
+        else if (strcmp(argv[i],"--report")==0 && i+1<argc) report=argv[++i];
         else if (strcmp(argv[i],"--window")==0){
             want_window = true;
             if (i+1<argc && argv[i+1][0] != '-') win_scale = (int)strtol(argv[++i],NULL,0);
         }
         else if (argv[i][0] != '-') rom = argv[i];
-        else fprintf(stderr,"[runner] unknown arg: %s\n", argv[i]);
+        else {fprintf(stderr,"[runner] unknown or incomplete arg: %s\n", argv[i]);return 2;}
     }
     if (!rom){
         fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms] "
                        "[--window [scale]] [--audio-wav out.wav] [--mute] "
-                       "[--press FRAME:KEYS] [--interp]\n", argv[0]);
+                       "[--press FRAME:KEYS] [--route route.txt] [--report out.json] [--interp]\n", argv[0]);
         return 2;
     }
 
     bool is_gg = (force_gg >= 0) ? (force_gg==1) : ends_with(rom, ".gg");
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    is_gg=g_game_spec.platform==GAME_PLATFORM_GG;
+    if (force_gg>=0 && (force_gg==1)!=is_gg){
+        fprintf(stderr,"[runner] platform override does not match this generated build\n");return 2;
+    }
+#endif
 
     /* In windowed mode, default to run-until-closed unless --frames was given. */
     if (want_window && !frames_set) frames = 0;
@@ -188,11 +202,21 @@ int main(int argc, char **argv){
     fprintf(stderr,"[runner] SMS/GG recompiled runner (%s)\n",
             want_window ? "windowed" : "headless");
     if (!glue_load_rom(rom)) return 1;
+    if (route){
+        if (g_press_n || !coverage_route_load(route,glue_rom_crc32())) return 2;
+        if (frames_set && coverage_route_last_frame()>frames){coverage_route_close();return 2;}
+        if (!frames_set)frames=coverage_route_last_frame()+1;
+    }
     fprintf(stderr,"[runner] loaded %s (%llu bytes), platform=%s, running %s\n",
             rom, (unsigned long long)glue_rom_size(), is_gg?"GG":"SMS",
             frames ? "to frame limit" : "until window close");
 
     glue_init(is_gg, frames);
+    if (route){
+        g_automated_input=true;
+        glue_set_boundary_callback(coverage_route_frame);
+        if (coverage_route_frame(0)){coverage_route_close();return 1;}
+    }
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
     if (psg_log) glue_set_psg_log(psg_log);
@@ -203,6 +227,7 @@ int main(int argc, char **argv){
     }
 #endif
     if (g_press_n){
+        g_automated_input=true;
         glue_set_input_cb(press_provider);
         fprintf(stderr,"[runner] scripted input: %d directive(s)\n", g_press_n);
     }
@@ -260,5 +285,8 @@ int main(int argc, char **argv){
 
     fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
             (unsigned long long)glue_frame_count(), glue_dispatch_miss_count());
-    return 0;
+    bool ok=!coverage_route_failed();
+    if (report && !glue_write_report(report))ok=false;
+    coverage_route_close();
+    return ok?0:1;
 }
