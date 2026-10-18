@@ -10,7 +10,7 @@ This is **not** an emulator and **not** a hand-port: the game's Z80 machine
 code becomes native C that runs directly; only the surrounding silicon is
 modeled by the runtime.
 
-> **Status: early (v0.0.2) — pre-release, expect bugs.** Two games are in
+> **Status: early (v0.0.3) — pre-release, expect bugs.** Two games are in
 > bring-up: **Sonic the Hedgehog (SMS)** and **Sonic Blast (Game Gear)**. Across
 > the title + attract-demo path exercised so far (~40–60s), both run with no
 > interpreter-fallback dispatch miss (100% static) and have been validated
@@ -26,6 +26,11 @@ modeled by the runtime.
 | ![Sonic 1 Green Hill Zone](screenshots/sonic1-green-hill-zone.png) | ![Sonic Blast gameplay](screenshots/sonicblast-gameplay.png) |
 
 *Recompiled native builds (no emulator), captured running the original ROMs.*
+
+The [assisted coverage pass](COVERAGE.md) extends the original opening tests to
+29 Sonic 1 routes and all 30 Sonic Blast act/character combinations, with zero
+fallback on those routes. It also fixes live-bank dispatch and in-flight
+fallback accounting, and centralizes game builds and ROM-bound QA controls.
 
 ## Per-game runner repos
 

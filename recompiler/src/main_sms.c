@@ -113,8 +113,10 @@ int main(int argc, char **argv){
     if (!rom_parse(rompath, &rom)) return 1;
 
     if (cfg.have_crc && cfg.crc32 != rom.crc32){
-        fprintf(stderr,"[SmsRecomp] WARNING: ROM crc32 0x%08X != game.toml 0x%08X\n",
+        fprintf(stderr,"[SmsRecomp] ROM crc32 0x%08X != game.toml 0x%08X\n",
                 rom.crc32, cfg.crc32);
+        rom_free(&rom);
+        return 1;
     }
     if (cfg.platform != rom.platform){
         fprintf(stderr,"[SmsRecomp] NOTE: game.toml platform=%s but ROM region implies %s\n",
