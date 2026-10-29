@@ -1059,6 +1059,10 @@ static bool emit_flat_live_operands(FILE *o, const Z80Insn *in, uint16_t addr)
         case 0x32: fprintf(o, "        sms_write8(nn, s->a);\n"); break;
         case 0x3A: fprintf(o, "        s->a = sms_read8(nn);\n"); break;
         }
+        if (in->opcode == 0x32)
+            fprintf(o, "        s->wz = (uint16_t)((s->a << 8) | ((nn + 1) & 0xff));\n");
+        else
+            fprintf(o, "        s->wz = (uint16_t)(nn + 1);\n");
         fprintf(o, "            return;\n        }\n");
         return true;
     }
@@ -1092,6 +1096,7 @@ static bool emit_flat_live_operands(FILE *o, const Z80Insn *in, uint16_t addr)
         fprintf(o, "        s->cyc += %d;\n", cyc_base(in));
         fprintf(o, "        uint16_t ea = (uint16_t)(%s + (int8_t)sms_read8(0x%04X));\n",
                 idx, (uint16_t)(addr + 2));
+        fprintf(o, "        s->wz = ea;\n");
         emit_alu(o, alu, "sms_read8(ea)");
         fprintf(o, "            return;\n        }\n");
         return true;
