@@ -33,6 +33,18 @@ generated case keeps the opcode statically decoded and reads the live immediate
 or indexed displacement at execution time. This avoids treating ordinary
 operand changes as new code.
 
+Live absolute loads/stores also publish WZ from the live address (including
+the Z80's special A/high-byte rule for `LD (nn),A`); indexed ALU operations
+publish the effective IX/IY address. WZ is architectural state: retaining a
+stale pointer can affect later undocumented flags even when the immediate
+load/store result looks correct.
+
+The Genesis adapter differential fixture exercises real generated variants,
+all256 immediate/displacement values, absolute loads/stores, unknown and
+partially uploaded instructions against SuperZazu's full state and RAM. Its
+synthetic inputs, producer identity and generated outputs are retained in
+`segagenesisrecomp/tests/z80_adapter`; no game capture is needed for that test.
+
 The host consumes `z80-recomp-core` and supplies its `sms_runtime.h` bus
 functions around the shared `Z80State`. If
 it already defines a symbol named `call_by_address`, compile with
