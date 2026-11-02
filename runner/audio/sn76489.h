@@ -19,6 +19,10 @@ void   psg_init(void);
  * frames into the internal scratch (one frame per 16 T-states). Sub-frame
  * remainder is accumulated, so calling this with small deltas is exact. */
 void   psg_advance(uint32_t cycles_z80);
+/* Define SMS_PSG_REFERENCE when building sn76489.c to retain the original
+ * per-sample oscillator/mixer implementation instead of native event spans.
+ * Both builds serialize the same authoritative PSG state; derived mixes are
+ * rebuilt after reset/load/volume/panning changes and are never serialized. */
 
 /* PSG data / latch byte (SMS port $7F, mirror $40-$7F). */
 void   psg_write(uint8_t value);
@@ -32,6 +36,8 @@ void   psg_write_stereo(uint8_t mask);
  * must hold 2*frame_count int16). Returns the number of frames written. */
 size_t psg_render(int16_t *out, size_t frame_count);
 size_t psg_frames_available(void);
+/* Borrow scratch only for this synchronous callback; do not reenter synthesis. */
+void psg_drain(void (*sink)(const int16_t *, size_t));
 
 uint32_t psg_sample_rate(void);
 

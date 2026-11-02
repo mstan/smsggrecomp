@@ -46,7 +46,6 @@ static const char *PFX[] = {"--","CB","ED","DD","FD","DDCB","FDCB"};
 void cg_probe(const SmsRom *rom, const FuncList *fl){
     int n = fl->count;
     uint16_t *entries = (uint16_t*)malloc((size_t)(n>0?n:1)*sizeof(uint16_t));
-    for (int i=0;i<n;i++) entries[i]=fl->items[i].addr;
 
     static int hist[7*256]; memset(hist,0,sizeof(hist));
     long total_insn=0, total_bytes=0;
@@ -60,7 +59,8 @@ void cg_probe(const SmsRom *rom, const FuncList *fl){
     for (int i=0;i<n;i++){
         if (!fl->items[i].is_entry) continue;
         TraceResult tr;
-        trace_function(rom, fl->items[i].addr, fl->items[i].bank, entries, n, &tr);
+        int visible=ff_visible_entries(fl,fl->items[i].addr,fl->items[i].bank,entries,n);
+        trace_function(rom, fl->items[i].addr, fl->items[i].bank, entries, visible, &tr);
         traced_funcs++;
         if (tr.truncated) n_truncated++;
         for (int k=0;k<tr.insn_count;k++){
@@ -338,12 +338,30 @@ static const char *name_for_target(uint16_t T){
         if (bankstate_target(G_BS, T, &bank))
             idx = funclist_find(G_FL, T, bank);
     }
-    if (idx < 0) idx = funclist_find(G_FL, T, -1);   /* fixed-region fallback */
-    if (idx < 0)
-        for (int i=0;i<G_FL->count;i++)
-            if (G_FL->items[i].addr==T && G_FL->items[i].is_entry){ idx=i; break; }
+    /* An entry in a different bank is never a substitute for an unresolved
+     * physical target. Let live-bank dispatch handle missing/unknown mappings. */
     if (idx>=0 && G_FL->items[idx].is_entry) return G_FL->items[idx].name;
     return NULL;
+}
+/* A native call is legal only under the live bank. The reference build uses
+ * the generic dispatcher; the native build bypasses its address switch while
+ * retaining the same bank guard and exact unknown-target fallback. */
+static void format_native_call(char *out,size_t cap,uint16_t T){
+    if(T<0x400){
+        const char *nm=name_for_target(T);
+        if(nm){snprintf(out,cap,"%s();",nm);return;}
+    }else if(G_BS && T<0xc000){
+        int bank;
+        if(bankstate_target(G_BS,T,&bank)){
+            int idx=funclist_find(G_FL,T,bank);
+            int physical=bank>=0?bank:T>>14;
+            if(idx<0)idx=funclist_find(G_FL,T,physical);
+            if(idx>=0 && G_FL->items[idx].is_entry){
+                snprintf(out,cap,"SMS_CALL_BANKED(0x%04X,%d,%s);",T,physical,G_FL->items[idx].name);return;
+            }
+        }
+    }
+    snprintf(out,cap,"call_by_address(0x%04X);",T);
 }
 
 /* ---- ALU A,(operand) ---- */
@@ -623,24 +641,19 @@ static void emit_jump_target(FILE *o, uint16_t T, const char *condexpr, int extr
         }
         return;
     }
-    const char *nm = name_for_target(T);
+    char call[512];format_native_call(call,sizeof call,T);
     if (condexpr){
         fprintf(o,"        if (%s) { ", condexpr);
         if (extra) fprintf(o,"s->cyc += %d; ", extra);
-        if (nm) fprintf(o,"%s(); return; }\n", nm);
-        else    fprintf(o,"call_by_address(0x%04X); return; }\n", T);
+        fprintf(o,"%s return; }\n",call);
     } else {
-        if (nm) fprintf(o,"        %s(); return;\n", nm);
-        else    fprintf(o,"        call_by_address(0x%04X); return;\n", T);
+        fprintf(o,"        %s return;\n",call);
     }
 }
 
 /* ---- call target (push return addr + C-call; pop happens at the RET) ---- */
 static void emit_call_target(FILE *o, uint16_t T, uint16_t ret, const char *condexpr, int extra){
-    const char *nm = name_for_target(T);
-    char call[64];
-    if (nm) snprintf(call,sizeof call,"%s();", nm);
-    else    snprintf(call,sizeof call,"call_by_address(0x%04X);", T);
+    char call[512];format_native_call(call,sizeof call,T);
     /* Propagation guard: a well-behaved callee returns with SP exactly back to
      * its pre-push value. If it returns HIGHER (it popped its own return and
      * RET'd to an ancestor — the "abort N frames" idiom), the Z80 control flow
@@ -700,11 +713,45 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
     }
 }
 
+/* Register-only instructions can run together when their entire cost fits
+ * before the next host event. Exclude memory, I/O, prefixes (including R
+ * reads), EI/DI, HALT and transfers. The original instruction path remains
+ * authoritative at a deadline and after EI. */
+static bool span_register_op(const Z80Insn *in){
+    if(in->prefix!=Z80_PFX_NONE || in->cf!=Z80_CF_NONE || in->is_halt || in->illegal)return false;
+    int op=in->opcode,x=op>>6,y=(op>>3)&7,z=op&7;
+    if(x==0){
+        if(z==0)return op==0x00 || op==0x08;
+        if(z==1 || z==3 || z==7)return true;
+        if(z==4 || z==5 || z==6)return y!=6;
+        return false;
+    }
+    if(x==1)return y!=6 && z!=6;
+    if(x==2)return z!=6;
+    return z==6 || op==0xd9 || op==0xeb || op==0xf9;
+}
+
+static int register_span_end(const TraceResult *tr,int k,const uint16_t *lbl,int nlbl){
+    int end=k;
+    for(int j=k;j<tr->insn_count && j<k+8;j++){
+        if(!span_register_op(&tr->insns[j].insn))break;
+        if(j>k){
+            if(tr->insns[j].addr!=tr->insns[j-1].addr+tr->insns[j-1].insn.length)break;
+            bool entry=false;
+            for(int l=0;l<nlbl;l++)if(lbl[l]==tr->insns[j].addr){entry=true;break;}
+            if(entry)break;
+        }
+        end=j;
+    }
+    return end;
+}
+
 /* ---- one function ---- */
 static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
-                          const uint16_t *ents, int nent){
+                          uint16_t *ents, int nent){
     TraceResult tr;
-    trace_function(rom, fe->addr, fe->bank, ents, nent, &tr);
+    int visible=ff_visible_entries(G_FL,fe->addr,fe->bank,ents,nent);
+    trace_function(rom, fe->addr, fe->bank, ents, visible, &tr);
     G_TR = &tr;
 
     /* labels: any jump target that lands inside this function body */
@@ -745,13 +792,33 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
      * the right bank (mirrors the finder's discovery). */
     BankState bs; bankstate_init(&bs, fe->addr, fe->bank); G_BS = &bs;
 
+    int span_end=-1;
     for (int k=0;k<tr.insn_count;k++){
         bankstate_step(&bs, &tr.insns[k], k>0 ? &tr.insns[k-1] : NULL);
         uint16_t a=tr.insns[k].addr; const Z80Insn *in=&tr.insns[k].insn;
         bool islbl=false; for (int j=0;j<nlbl;j++) if (lbl[j]==a){ islbl=true; break; }
         if (islbl) fprintf(o,"L_%04X:\n", a);
+        if(k>span_end){
+            int end=register_span_end(&tr,k,lbl,nlbl);
+            if(end>k){
+                int cost=0;
+                for(int j=k;j<=end;j++)cost+=cyc_base(&tr.insns[j].insn);
+                fprintf(o,"#ifdef SMS_NATIVE_SPANS\n"
+                          "    if (!s->ei_block && s->cyc < g_sync_deadline && %d <= g_sync_deadline - s->cyc) {\n",cost);
+                for(int j=k;j<=end;j++){
+                    fprintf(o,"        { /* %04X %s */\n",tr.insns[j].addr,tr.insns[j].insn.text);
+                    emit_op(o,&tr.insns[j].insn);
+                    fprintf(o,"        }\n");
+                }
+                fprintf(o,"        s->r = (uint8_t)((s->r & 0x80) | ((s->r + %d) & 0x7f));\n"
+                          "        s->cyc += %d;\n    } else\n#endif\n    {\n",end-k+1,cost);
+                span_end=end;
+            }
+        }
         fprintf(o,"    /* %04X  %s */\n", a, in->text);
-        fprintf(o,"    SMS_PC(0x%04X);\n", a);
+        bool observed=in->cf!=Z80_CF_NONE || in->is_halt || in->opcode==0xdb || in->opcode==0xd3 ||
+            (in->prefix==Z80_PFX_ED && (((in->opcode&0xc7)==0x40) || ((in->opcode&0xc7)==0x41) || ((in->opcode&0xe4)==0xa0)));
+        fprintf(o,"    %s(0x%04X);\n",observed?"SMS_PC_CONTROL":"SMS_PC", a);
         /* R (memory-refresh) auto-increment: +1 per M1 opcode fetch; a prefix
          * byte (CB/ED/DD/FD, incl. DDCB/FDCB) adds one more M1. Matches superzazu
          * inc_r. R only affects LD A,R reads (used by some games for PRNG). */
@@ -766,6 +833,7 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         } else {
             emit_cf(o,in,a);
         }
+        if(k==span_end)fprintf(o,"    } /* instruction-boundary fallback */\n");
     }
     fprintf(o,"}\n\n");
     G_BS = NULL;
@@ -784,8 +852,13 @@ static void write_funcs_header(const char *path, const char *pfx, const FuncList
         " * Prototypes for every recompiled function. call_by_address() (defined\n"
         " * in %s_dispatch.c) and the timing/IO surface come from sms_runtime.h. */\n"
         "#pragma once\n"
+        "#define SMS_GENERATED_NATIVE_PC 1\n"
         "#include \"sms_runtime.h\"\n"
-        "#include \"z80_ops.h\"\n\n", pfx, pfx);
+        "#include \"z80_ops.h\"\n"
+        "#ifndef SMS_PC_CONTROL\n#define SMS_PC_CONTROL(a) SMS_PC(a)\n#endif\n"
+        "#ifdef SMS_NATIVE_DISPATCH\n"
+        "#define SMS_CALL_BANKED(a,b,f) do { if(sms_slot_bank(a)==(b)) f(); else call_by_address(a); } while(0)\n"
+        "#else\n#define SMS_CALL_BANKED(a,b,f) call_by_address(a)\n#endif\n\n", pfx, pfx);
     for (int i=0;i<fl->count;i++)
         if (fl->items[i].is_entry)
             fprintf(h,"void %s(void);\n", fl->items[i].name);
@@ -815,6 +888,10 @@ static void write_dispatch(const char *path, const char *pfx, const FuncList *fl
             if (fl->items[j].is_entry && fl->items[j].addr==a) vidx[nv++]=j;
         if (nv == 1 && a < 0x0400){
             fprintf(d,"    case 0x%04X: %s(); return;\n", a, fl->items[vidx[0]].name);
+        } else if(nv==1){
+            int b=fl->items[vidx[0]].bank;
+            fprintf(d,"    case 0x%04X: if(sms_slot_bank(0x%04X)==%d){ %s(); return; } break;\n",
+                a,a,b>=0?b:(a>>14),fl->items[vidx[0]].name);
         } else {
             /* runtime bank for a variant: explicit bank, or the slot's default
              * (slot index) for a fixed (-1) entry. */
@@ -868,7 +945,6 @@ void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg, const
 
     int n = fl->count;
     uint16_t *ents=(uint16_t*)malloc((size_t)(n>0?n:1)*sizeof(uint16_t));
-    for (int i=0;i<n;i++) ents[i]=fl->items[i].addr;
 
     snprintf(path,sizeof path,"%s/%s_funcs.h", out_dir, pfx);
     write_funcs_header(path, pfx, fl);

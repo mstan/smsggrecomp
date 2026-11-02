@@ -80,6 +80,14 @@ static void dump_frame(const char *prefix, int frame)
     char p[1024]; FILE *f;
     snprintf(p, sizeof p, "%s_%d.vram", prefix, frame);
     f = fopen(p, "wb"); if (f) { fwrite(vram, 1, 0x4000, f); fclose(f); }   /* SMS uses 16KB */
+    /* Oracle-only scanout: consume the public frontend bitmap, never renderer
+     * implementation details. Keep RGB565 bytes and geometry explicit. */
+    snprintf(p,sizeof p,"%s_%d.rgb565",prefix,frame);
+    f=fopen(p,"wb");
+    if(f){fwrite(g_fb,sizeof g_fb[0],1024*512,f);fclose(f);}
+    snprintf(p,sizeof p,"%s_%d.viewport",prefix,frame);
+    f=fopen(p,"w");
+    if(f){fprintf(f,"%d %d %d %d\n",bitmap.viewport.x,bitmap.viewport.y,bitmap.viewport.w,bitmap.viewport.h);fclose(f);}
     /* GPGX stores SMS CRAM at a 2-byte stride (6-bit value in even byte, odd=0);
      * de-stride to the 32-byte raw SMS CRAM the recomp/Mesen emit. (GG's 12-bit
      * 2-byte/entry CRAM would be dumped raw — handle when GG is added.) */
@@ -190,6 +198,7 @@ int main(int argc, char **argv)
 {
     const char *rom = NULL, *out = "smsref", *dumplist = "", *wavpath = NULL, *replay = NULL;
     int frames = 2000, server_port = 0;
+    struct { unsigned frame,mask; } press[32];int npress=0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dumplist = argv[++i];
@@ -197,6 +206,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wavpath = argv[++i];
         else if (!strcmp(argv[i], "--replay-psg") && i + 1 < argc) replay = argv[++i];
         else if (!strcmp(argv[i], "--server") && i + 1 < argc) server_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--press") && i+1<argc){
+            const char *s=argv[++i],*keys=strchr(s,':');unsigned mask=0;
+            if(keys)for(keys++;*keys;keys++)switch(*keys){
+                case 'U':mask|=INPUT_UP;break;case 'D':mask|=INPUT_DOWN;break;
+                case 'L':mask|=INPUT_LEFT;break;case 'R':mask|=INPUT_RIGHT;break;
+                case 'A':mask|=INPUT_BUTTON1;break;case 'B':mask|=INPUT_BUTTON2;break;
+                case 'S':mask|=INPUT_START;break;
+            }
+            if(npress<32){press[npress].frame=(unsigned)strtoul(s,NULL,10);press[npress++].mask=mask;}
+        }
         else if (argv[i][0] != '-') rom = argv[i];
     }
     if (!rom) { fprintf(stderr, "usage: smsref <rom> [--server PORT | --frames N --dump F1,F2 --out PREFIX]\n"); return 2; }
@@ -259,6 +278,11 @@ int main(int argc, char **argv)
     if (wavpath) { wav = fopen(wavpath, "wb"); if (wav) wav_hdr(wav, WRATE, 0); }
 
     for (int fr = 1; fr <= frames; fr++) {
+        unsigned best=0,mask=0;int found=0;
+        for(int i=0;i<npress;i++)if(press[i].frame<(unsigned)fr&&(!found||press[i].frame>=best)){
+            best=press[i].frame;mask=press[i].mask;found=1;
+        }
+        input.pad[0]=mask;
         system_frame_sms(0);
         if (wav) { int n = audio_update(abuf); if (n > 0) { fwrite(abuf, 4, n, wav); wav_total += n; } }
         for (int k = 0; k < nwant; k++) if (want[k] == fr) dump_frame(out, fr);

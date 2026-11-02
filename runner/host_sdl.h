@@ -13,6 +13,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
+/* 0 keeps ordinary native SDL; 1..16 explicitly request the GPU job path. */
+void host_set_internal_scale(int scale);
+void host_set_hidden(bool hidden);
+void host_report(FILE *out);
+bool host_dump_gpu(const char *path);
+bool host_uses_gpu(void);
 
 /* Open a window showing the `crop_w`x`crop_h` region at (`crop_x`,`crop_y`) of
  * the runner's 256x192 ARGB framebuffer, scaled by `scale`. Returns false on

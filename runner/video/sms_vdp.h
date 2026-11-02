@@ -66,6 +66,18 @@ bool    vdp_irq_asserted(void);
  * render from end-of-frame state - no per-scanline raster effects yet. */
 void    vdp_render_frame(uint32_t *fb);
 
+/* Owned native-density jobs. Inline source rows freeze VRAM at preparation;
+ * no pointer refers to mutable guest memory. Texture layout is RGBA32UI. */
+#define VDP_JOB_WIDTH 105
+typedef struct { uint32_t word[VDP_JOB_WIDTH][4]; } VdpLineJob;
+typedef struct { VdpLineJob line[SMS_SCREEN_H]; } VdpFrameJob;
+void vdp_prepare_frame(VdpFrameJob *frame);
+void vdp_render_jobs(const VdpFrameJob *frame, uint32_t *fb);
+void vdp_render_reference(uint32_t *fb);
+const VdpFrameJob *vdp_frame_jobs(void);
+/* Capture at scanline completion, before later guest writes can alter it. */
+void vdp_enable_raster(bool enabled);
+
 /* Optional VDP-write observer (dev instrumentation, decoupled from the runner).
  * Called with the RESOLVED write each time the CPU writes a VDP register or
  * CRAM (VRAM writes are NOT reported - too high-volume, and not needed for the

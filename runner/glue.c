@@ -39,6 +39,14 @@ static size_t    g_rom_size;
 static uint32_t  g_rom_crc;
 static uint8_t   g_ram[0x2000];     /* 8 KB system RAM ($C000-$DFFF) */
 static int       g_bank[3] = {0,1,2};
+static const uint8_t *g_rom_page[3];
+static void set_bank(int slot,int bank){
+    g_bank[slot]=bank;
+    /* Whole-bank ROMs admit a direct window. Odd sizes retain exact byte
+     * modulo behavior, including accesses across a partial final bank. */
+    g_rom_page[slot]=(g_rom && g_rom_size && !(g_rom_size&0x3fff))
+        ? g_rom+((size_t)(unsigned)bank*0x4000u)%g_rom_size : NULL;
+}
 static bool      g_mapper_cm;        /* Codemasters mapper */
 
 /* ---- timing ---- */
@@ -107,6 +115,8 @@ static uint32_t  g_fb[SMS_SCREEN_W * SMS_SCREEN_H];
 /* ---- live per-frame callback (SDL host) ---- */
 static int (*g_frame_cb)(const uint32_t *fb, int w, int h);
 static int (*g_boundary_cb)(uint64_t frame);
+static bool g_native_output=true;
+void glue_set_native_output(bool needed){g_native_output=needed;}
 
 /* ---- platform + audio ----
  * g_is_gg gates the GG-only stereo register ($06). The PSG is advanced from
@@ -147,7 +157,7 @@ static uint64_t fnv1a64(const void *buf, size_t n){
  * the LIVE bus at the miss target, so it captures exactly which banked bytes the
  * CPU would execute there. Query (dump) at run end to ask: for a given addr (e.g.
  * 0x8000), do the mapped bank / code bytes vary across the run? A varying
- * signature means the same Z80 address hosts different banked functions — the
+ * signature means the same Z80 address hosts different banked functions â€” the
  * static finder must disambiguate them by bank (PRINCIPLES #16). Env-gated by
  * SMS_MISSBANK so it is inert in normal runs; never arm-then-attach (PRINCIPLES #17). */
 typedef struct { uint64_t frame; uint16_t addr; uint8_t b0,b1,b2; uint32_t crc; } MissBankEv;
@@ -156,7 +166,7 @@ static MissBankEv g_mb_ring[MB_RING];
 static uint32_t   g_mb_pos;
 static int        g_mb_on = -1;
 /* per-entry-addr interpreter cycle tally, so the dump shows which dispatch-miss
- * routines actually dominate interp cycles — the dominant-class triage signal for
+ * routines actually dominate interp cycles â€” the dominant-class triage signal for
  * which routines the static finder should resolve next. */
 static uint64_t   g_interp_cyc[0x10000];
 static void mb_interp(uint16_t addr, uint64_t cyc){ if (g_mb_on > 0) g_interp_cyc[addr] += cyc; }
@@ -349,6 +359,12 @@ static inline uint8_t rom_byte(int bank, uint32_t off){
 }
 
 uint8_t sms_read8(uint16_t a){
+#ifndef SMS_BUS_REFERENCE
+    if(a<0xc000 && g_rom_page[a>>14]){
+        if(a<0x400)return g_rom[a];
+        return g_rom_page[a>>14][a&0x3fff];
+    }
+#endif
     if (a < 0x0400) return rom_byte(0, a);              /* fixed first 1 KB */
     if (a < 0x4000) return rom_byte(g_bank[0], a);
     if (a < 0x8000) return rom_byte(g_bank[1], (uint32_t)a - 0x4000);
@@ -381,17 +397,17 @@ void sms_write8(uint16_t a, uint8_t v){
         if (a >= 0xFFFC){                                /* Sega frame regs */
             switch (a){
                 case 0xFFFC: break;                      /* RAM/mapper control */
-                case 0xFFFD: g_bank[0] = v; break;
-                case 0xFFFE: g_bank[1] = v; break;
-                case 0xFFFF: g_bank[2] = v; break;
+                case 0xFFFD: set_bank(0,v); break;
+                case 0xFFFE: set_bank(1,v); break;
+                case 0xFFFF: set_bank(2,v); break;
             }
         }
         return;
     }
     if (g_mapper_cm){                                    /* Codemasters frame regs */
-        if      (a == 0x0000) g_bank[0] = v;
-        else if (a == 0x4000) g_bank[1] = v;
-        else if (a == 0x8000) g_bank[2] = v;
+        if      (a == 0x0000) set_bank(0,v);
+        else if (a == 0x4000) set_bank(1,v);
+        else if (a == 0x8000) set_bank(2,v);
     }
     /* Sega mapper: ROM region is read-only. */
 }
@@ -466,9 +482,7 @@ static void frame_completed(void){
     if (g_audio_sink){
         /* Drain this frame's PSG output to the sink (interleaved stereo). The
          * PSG was advanced up to the current absolute cycle in advance_vdp(). */
-        int16_t buf[2048 * 2];
-        size_t n;
-        while ((n = psg_render(buf, 2048)) > 0) g_audio_sink(buf, n);
+        psg_drain(g_audio_sink);
     }
     if (g_vdp_trace){
         /* End-of-frame VDP state == what the renderer would consume for this
@@ -630,8 +644,8 @@ static void frame_completed(void){
                     (unsigned long long)g_frame, g_dump_path);
     }
     if (g_frame_cb){                     /* live host: render + present every frame */
-        vdp_render_frame(g_fb);
-        if (g_frame_cb(g_fb, SMS_SCREEN_W, SMS_SCREEN_H) && g_running)
+        if(g_native_output && !(g_dump_path && g_frame==g_dump_frame))vdp_render_frame(g_fb);
+        if (g_frame_cb(g_native_output?g_fb:NULL, SMS_SCREEN_W, SMS_SCREEN_H) && g_running)
             longjmp(g_quit_env, 1);      /* user closed the window */
     }
     if (g_frame_limit && g_frame >= g_frame_limit && g_running)
@@ -703,7 +717,7 @@ static void advance_vdp(uint64_t cyc){
 /* Set the CPU's next sync deadline. Normally the next scanline event, BUT while
  * the VDP /INT line is asserted (frame/line IRQ pending and not yet cleared) we
  * deadline at the very next instruction so the recompiled path SAMPLES the IRQ
- * at every instruction boundary — exactly like the interpreter/hybrid do — until
+ * at every instruction boundary â€” exactly like the interpreter/hybrid do â€” until
  * it is accepted (iff1) or the source is cleared (status read). This is the one
  * fix that unifies the interrupt-sampling contract across all three CPU modes;
  * the hot path stays a single compare while no IRQ is pending. */
@@ -713,6 +727,19 @@ void sms_set_sync_deadline(void){
 
 void sms_sync(void){
     if (++g_sync_depth > g_sync_maxdepth) g_sync_maxdepth = g_sync_depth;
+#ifdef SMS_NATIVE_EVENTS
+    /* An asserted IRQ with IFF1 clear schedules instruction-sized syncs.
+     * Before the next line there is no raster/frame/IRQ-accept job to run;
+     * advance audio at the original instruction boundary and publish the next
+     * deadline directly. Status/enable writes are observed on every call. */
+    if(!g_diff_freeze && !g_z80.iff1 && g_z80.cyc<g_next_line_cyc){
+        if(g_audio_sink && g_z80.cyc>g_psg_cyc){
+            psg_advance((uint32_t)(g_z80.cyc-g_psg_cyc));g_psg_cyc=g_z80.cyc;
+        }
+        g_sync_deadline=vdp_irq_asserted()?g_z80.cyc+1:g_next_line_cyc;
+        g_sync_depth--;return;
+    }
+#endif
     advance_vdp(g_z80.cyc);
     if (vdp_irq_asserted() && g_z80.iff1 && !g_z80.ei_block)
         take_irq();
@@ -886,7 +913,7 @@ static void hybrid_interpret(uint16_t addr){
     g_z80.cyc = base + g_hz.cyc;         /* reapply rebased absolute time */
     /* If the routine left an IRQ asserted (e.g. VBlank latched while iff1 was
      * clear), deadline at the next instruction so native accepts it the instant
-     * it becomes eligible — not many instructions later at the next line. This
+     * it becomes eligible â€” not many instructions later at the next line. This
      * is the hybrid->native handoff half of the interrupt-sampling fix. */
     sms_set_sync_deadline();
 }
@@ -894,7 +921,7 @@ static void hybrid_interpret(uint16_t addr){
 /* ============ differential function harness (invariant, timing-free) ============ *
  * Invariant: a recompiled function F started from state S must produce the same
  * register+RAM exit deltas as superzazu running F from S. We run BOTH from one
- * captured snapshot with IRQ/VDP FROZEN (so neither side is interrupted — pure
+ * captured snapshot with IRQ/VDP FROZEN (so neither side is interrupted â€” pure
  * computation, no timeline), then diff. A nonzero delta is a pure translation
  * bug, independent of any emulator timeline. Env: SMS_DIFF_ADDR=<hex> picks the
  * function to test; SMS_DIFF_LO/HI bound the frame window. */
@@ -939,7 +966,7 @@ static void diff_save(DiffSnap *s){
 }
 static void diff_restore(const DiffSnap *s){
     g_z80=s->z; memcpy(g_ram,s->ram,sizeof g_ram);
-    g_bank[0]=s->bank[0]; g_bank[1]=s->bank[1]; g_bank[2]=s->bank[2];
+    set_bank(0,s->bank[0]);set_bank(1,s->bank[1]);set_bank(2,s->bank[2]);
     g_vdp=s->vdp; g_next_line_cyc=s->next_line; g_sync_deadline=s->deadline; g_psg_cyc=s->psg;
 }
 /* run F purely in superzazu from the current g_z80, until it RETs (sp rises above
@@ -965,7 +992,7 @@ static void diff_run_super(uint16_t addr){
         /* Treat it as the function returning only when an actual RET *fired* and
          * raised SP above entry. Requiring SP to have risen this step excludes
          * (a) a bare `pop` (not a ret) and (b) an UNTAKEN conditional ret (SP
-         * unchanged) — both of which otherwise false-trip when an earlier pop
+         * unchanged) â€” both of which otherwise false-trip when an earlier pop
          * already lifted SP above entry. */
         if (!g_hz.halted && is_ret && g_hz.sp > sp_before && g_hz.sp > entry_sp) break;
         if (++guard >= 8L*1000*1000) break; }
@@ -1071,6 +1098,12 @@ void sms_diff_enter(uint16_t addr){
 }
 void glue_diff_init(void){
     const char *a=getenv("SMS_DIFF_ADDR");
+#ifdef SMS_NATIVE_HOOKS
+    if(a || getenv("SMS_IC_TRACE")){
+        fprintf(stderr,"[runner] instruction diagnostics require a build without SMS_NATIVE_HOOKS\n");
+        exit(2);
+    }
+#endif
     if (!a) return;
     g_diff_active=1; g_diff_ntargets=0;
     char buf[8192]; snprintf(buf,sizeof buf,"%s",a);   /* hold a full slot sweep (256 targets) */
@@ -1132,34 +1165,35 @@ bool glue_load_rom(const char *path){
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0){ fclose(f); fprintf(stderr, "[runner] empty ROM\n"); return false; }
-    g_rom = (uint8_t*)malloc((size_t)sz);
-    if (!g_rom){ fclose(f); return false; }
-    size_t got = fread(g_rom, 1, (size_t)sz, f);
+    uint8_t *loaded = (uint8_t*)malloc((size_t)sz);
+    if (!loaded){ fclose(f); return false; }
+    size_t got = fread(loaded, 1, (size_t)sz, f);
     fclose(f);
-    g_rom_size = got;
-    if (got != (size_t)sz) return false;
+    if(got!=(size_t)sz){free(loaded);return false;}
     uint32_t crc = 0xFFFFFFFFu;
     for (size_t i=0; i<got; ++i){
-        crc ^= g_rom[i];
+        crc ^= loaded[i];
         for (int b=0; b<8; ++b) crc = (crc>>1) ^ (0xEDB88320u & (0u-(crc&1u)));
     }
-    g_rom_crc = ~crc;
+    crc = ~crc;
 #ifdef SMSGG_HAVE_GAME_LAYOUT
-    if (g_rom_crc != g_game_spec.expected_rom_crc32 ||
+    if (crc != g_game_spec.expected_rom_crc32 ||
         got != g_game_spec.expected_rom_size){
         fprintf(stderr, "[runner] ROM does not match this generated build (expected %08X, %u bytes)\n",
                 g_game_spec.expected_rom_crc32, g_game_spec.expected_rom_size);
-        free(g_rom); g_rom = NULL; g_rom_size = 0;
+        free(loaded);
         return false;
     }
 #endif
+    free(g_rom);g_rom=loaded;g_rom_size=got;g_rom_crc=crc;
+    for(int i=0;i<3;i++)set_bank(i,g_bank[i]);
     return true;
 }
 
 void glue_init(bool is_gg, uint64_t frame_limit){
     memset(&g_z80, 0, sizeof(g_z80));
     memset(g_ram, 0, sizeof(g_ram));
-    g_bank[0]=0; g_bank[1]=1; g_bank[2]=2;
+    set_bank(0,0);set_bank(1,1);set_bank(2,2);
     g_z80.sp = 0xDFF0;
     g_z80.cyc = 0;
     g_next_line_cyc = SMS_CYC_PER_LINE;
@@ -1182,6 +1216,7 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     g_pad1 = g_pad2 = 0;                  /* controllers idle */
     g_hybrid_cyc = g_hybrid_calls = 0;
     glue_diff_init();                    /* differential harness (env-gated, no-op unless SMS_DIFF_ADDR) */
+    vdp_enable_raster(g_frame_cb || g_dump_path);
 }
 
 void glue_run_interp(void){
@@ -1263,7 +1298,7 @@ void glue_cyc_watch_close(void){
     g_cyc_watch_on = 0;
 }
 #endif
-void     glue_set_dump(uint64_t frame, const char *path){ g_dump_frame = frame; g_dump_path = path; }
+void     glue_set_dump(uint64_t frame, const char *path){ g_dump_frame = frame; g_dump_path = path; vdp_enable_raster(g_frame_cb || g_dump_path); }
 void     glue_set_vdp_trace(const char *path){
     if (g_vdp_trace){ fclose(g_vdp_trace); g_vdp_trace = NULL; }
     if (path){
@@ -1274,7 +1309,7 @@ void     glue_set_vdp_trace(const char *path){
             fprintf(stderr, "[runner] cannot open vdp-trace %s\n", path);
     }
 }
-void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h)){ g_frame_cb = cb; }
+void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h)){ g_frame_cb = cb; vdp_enable_raster(g_frame_cb || g_dump_path); }
 void     glue_set_audio_sink(void (*sink)(const int16_t *stereo_frames, size_t frame_count)){
     g_audio_sink = sink;
     g_psg_cyc = g_z80.cyc;   /* start metering audio from "now" */

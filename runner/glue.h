@@ -51,6 +51,9 @@ void     glue_cyc_watch_close(void);
  * 256x192 ARGB8888 image. `cb` returns nonzero to request shutdown (the run
  * loop then unwinds cleanly, as on the frame limit). Keeps glue.c host-agnostic. */
 void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h));
+/* Job consumers may decline pixel materialization. Their callback receives
+ * NULL pixels and consumes vdp_frame_jobs() synchronously instead. */
+void     glue_set_native_output(bool needed);
 
 /* Controller buttons (1 = pressed). The D-pad + two face buttons map to the
  * SMS controller ports $DC/$DD; START is the Game Gear's port-$00 bit-7 button

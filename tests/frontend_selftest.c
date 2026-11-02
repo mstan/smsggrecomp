@@ -49,7 +49,44 @@ int main(void){
     else { printf("FAIL internal label 0x0006 missing\n"); fails++; }
     trace_free(&tr);
 
+    /* ROM-proven dense object-state jump table, indexed through IX or IY. */
+    for(int which=0;which<2;which++){
+        const uint8_t dispatch[]={0xdd,0x7e,1,0x87,0x21,0x10,4,0x16,0,0x5f,0x19,0x7e,0x23,0x66,0x6f,0xe9,
+                                  0x16,4,0x17,4,0x18,4,0xc9,0xc9,0xc9};
+        memcpy(rom+0x400,dispatch,sizeof dispatch);rom[0x400]=which?0xfd:0xdd;
+        FuncList tables;funclist_init(&tables);
+        funclist_add(&tables,0x400,-1,NULL,FUNC_SRC_CONFIG,true);
+        ff_discover(&r,&tables,NULL,0);
+        for(int target=0x416;target<=0x418;target++){
+            int found=0;
+            for(int i=0;i<tables.count;i++)if(tables.items[i].addr==target)found=1;
+            if(!found){printf("FAIL indexed table %d target %04x\n",which,target);fails++;}
+        }
+        funclist_free(&tables);
+    }
+
     funclist_free(&fl);
+    FuncList aliases;funclist_init(&aliases);
+    funclist_add(&aliases,0x8000,4,NULL,FUNC_SRC_CONFIG,true);
+    funclist_add(&aliases,0x8100,3,NULL,FUNC_SRC_CONFIG,true);
+    uint16_t visible[2];
+    int count=ff_visible_entries(&aliases,0x8000,4,visible,2);
+    if(count!=1 || visible[0]!=0x8000){puts("FAIL other-bank entry truncated a trace");fails++;}
+    funclist_free(&aliases);
+    /* Other-bank code inside a dense table must not shorten the table. */
+    static uint8_t bankrom[6*0x4000];memset(bankrom,0xc9,sizeof bankrom);
+    const uint8_t indexed[]={0xdd,0x7e,1,0x87,0x21,0x10,0x80,0x16,0,0x5f,0x19,0x7e,0x23,0x66,0x6f,0xe9,
+                             0x1a,0x80,0x1b,0x80,0x1c,0x80,0x1d,0x80,0x1e,0x80};
+    memcpy(bankrom+4*0x4000,indexed,sizeof indexed);
+    SmsRom br={0};br.data=bankrom;br.size=sizeof bankrom;br.num_banks=6;br.mapper=SMS_MAPPER_SEGA;
+    funclist_init(&aliases);
+    funclist_add(&aliases,0x8000,4,NULL,FUNC_SRC_CONFIG,true);
+    funclist_add(&aliases,0x8016,3,NULL,FUNC_SRC_CONFIG,true);
+    ff_discover(&br,&aliases,NULL,0);
+    for(unsigned target=0x801a;target<=0x801e;target++)if(funclist_find(&aliases,(uint16_t)target,4)<0){
+        printf("FAIL other-bank code shortened table at %04x\n",target);fails++;
+    }
+    funclist_free(&aliases);
     printf("\n%s (%d failures)\n", fails?"FAILED":"ALL PASS", fails);
     return fails?1:0;
 }

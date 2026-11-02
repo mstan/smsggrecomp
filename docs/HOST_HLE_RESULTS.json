@@ -1,0 +1,336 @@
+{
+  "status": "Complete for approved Sonic SMS / Sonic Blast GG scope: candidate dispositions, combined automated gates and both owner visual passes",
+  "issue": "beads-xecp.1.6",
+  "campaign": "beads-2wy8.1",
+  "host": "DESKTOP-HN15M1H / RTX 3080 Ti",
+  "frame_period_ms": 16.68815450008311,
+  "headroom_limit_ms": 13.35052360006649,
+  "profile": "native-final-o2: O2; native hooks, guarded dispatch, register spans, quiet IRQ event jobs, PSG event spans; native VDP/bus; SDL default; explicit internal-scale uses GPU",
+  "baseline": "Incremental final pairs use the actual owner-accepted qualified-final-o2 binaries. Initial package measurements against baseline-qualified-o2 are preserved separately. No cross-run percentages are compounded.",
+  "rejected": "GPU as default native presentation: slower/more variable; retained only when internal resolution is explicitly selected. Raw trial is delivery-o2.",
+  "raw_root": "G:\\Temp\\Codex\\smsgg-host-20261101",
+  "games": {
+    "SonicTheHedgehogSMS": {
+      "native": {
+        "baseline_profile": "qualified-final-o2 (owner accepted)",
+        "candidate_profile": "native-final-o2",
+        "pairs": 5,
+        "route_cpu_ms_per_frame_baseline": 0.3984375,
+        "route_cpu_ms_per_frame_candidate": 0.3515625,
+        "route_cpu_reduction_percent": 11.764705882352942,
+        "whole_cpu_ms_per_frame_baseline": 0.40625,
+        "whole_cpu_ms_per_frame_candidate": 0.3697916666666667,
+        "whole_cpu_reduction_percent": 8.97435897435897,
+        "whole_native_disposition": "positive package; shared-load variation retained in raw paired samples",
+        "attribution": "Do not credit this package gain to register spans alone: separate 3-pair span samples are neutral/inconclusive in both games."
+      },
+      "required16x": "pass",
+      "final16_gpu_p95_ms": 0.19456,
+      "final16_frame_work_p95_ms": 0.9474,
+      "worst16_frame_work_p95_across_qualification_ms": 6.6291,
+      "paced_frame_work_p95_ms": 2.1823,
+      "paced_frame_work_max_ms": 9.1412,
+      "paced_process_wall_ms_including_startup": 20562.999999994645,
+      "upload_bytes_per_6000_frames": 469837200,
+      "upload_bytes_per_frame": 78306.2,
+      "upload_density_independence": "exact equal totals at1x/4x/16x",
+      "gpu_target_bytes": 50331648,
+      "resident_job_texture_bytes": 322560,
+      "memory_probe": {
+        "1": {
+          "peak_working_set_bytes": 72450048,
+          "frames": 600,
+          "argv": [
+            "G:\\Temp\\Codex\\smsgg-host-20261101\\qualified-final-o2\\SonicTheHedgehogSMS\\game.exe",
+            "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\sonicthehedgehog.sms",
+            "--frames",
+            "600",
+            "--benchmark",
+            "--window",
+            "2",
+            "--hidden",
+            "--internal-scale",
+            "1"
+          ]
+        },
+        "16": {
+          "peak_working_set_bytes": 71884800,
+          "frames": 600,
+          "argv": [
+            "G:\\Temp\\Codex\\smsgg-host-20261101\\qualified-final-o2\\SonicTheHedgehogSMS\\game.exe",
+            "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\sonicthehedgehog.sms",
+            "--frames",
+            "600",
+            "--benchmark",
+            "--window",
+            "2",
+            "--hidden",
+            "--internal-scale",
+            "16"
+          ]
+        }
+      },
+      "binary_sha256": "4187928a47716097865ff3b0f30b11de8e39c861fa06add2fdced08f444f930d",
+      "canonical_pcm_sha256": "9f4acb91883f87db442a4dff67e96e487573770a89a94fed569b82b17bcaa778",
+      "owner_playcheck": "pass: owner accepted qualified-final-o2; final native derivative has exact state/timeline/PCM/pixels; no repeat handoff",
+      "final16_frame_work_max_ms": 3.5541
+    },
+    "SonicBlastGG": {
+      "native": {
+        "baseline_profile": "qualified-final-o2 (owner accepted)",
+        "candidate_profile": "native-final-o2",
+        "pairs": 5,
+        "route_cpu_ms_per_frame_baseline": 0.4375,
+        "route_cpu_ms_per_frame_candidate": 0.3984375,
+        "route_cpu_reduction_percent": 8.928571428571429,
+        "whole_cpu_ms_per_frame_baseline": 0.4348958333333333,
+        "whole_cpu_ms_per_frame_candidate": 0.4088541666666667,
+        "whole_cpu_reduction_percent": 5.9880239520958005,
+        "whole_native_disposition": "positive package; shared-load variation retained in raw paired samples",
+        "attribution": "Do not credit this package gain to register spans alone: separate 3-pair span samples are neutral/inconclusive in both games."
+      },
+      "required16x": "pass",
+      "final16_gpu_p95_ms": 0.111616,
+      "final16_frame_work_p95_ms": 0.8109,
+      "worst16_frame_work_p95_across_qualification_ms": 7.6859,
+      "paced_frame_work_p95_ms": 5.5895,
+      "paced_frame_work_max_ms": 69.8002,
+      "paced_process_wall_ms_including_startup": 20437.999999994645,
+      "upload_bytes_per_6000_frames": 631137360,
+      "upload_bytes_per_frame": 105189.56,
+      "upload_density_independence": "exact equal totals at1x/4x/16x",
+      "gpu_target_bytes": 23592960,
+      "resident_job_texture_bytes": 322560,
+      "memory_probe": {
+        "1": {
+          "peak_working_set_bytes": 75616256,
+          "frames": 600,
+          "argv": [
+            "G:\\Temp\\Codex\\smsgg-host-20261101\\qualified-final-o2\\SonicBlastGG\\game.exe",
+            "F:\\Projects\\smsggrecomp\\SonicBlastGG\\sonicblast.gg",
+            "--frames",
+            "600",
+            "--benchmark",
+            "--window",
+            "2",
+            "--hidden",
+            "--internal-scale",
+            "1"
+          ]
+        },
+        "16": {
+          "peak_working_set_bytes": 75649024,
+          "frames": 600,
+          "argv": [
+            "G:\\Temp\\Codex\\smsgg-host-20261101\\qualified-final-o2\\SonicBlastGG\\game.exe",
+            "F:\\Projects\\smsggrecomp\\SonicBlastGG\\sonicblast.gg",
+            "--frames",
+            "600",
+            "--benchmark",
+            "--window",
+            "2",
+            "--hidden",
+            "--internal-scale",
+            "16"
+          ]
+        }
+      },
+      "binary_sha256": "6b5490c8e01037eb81c70e7a709dbe21003e4d33bbc994e51bc9ae7264563b4b",
+      "canonical_pcm_sha256": "ff98a460412b7c009e267ed98cb6187265dcfb250c8ca58954a12544a47485e5",
+      "owner_playcheck": "pass: owner accepted qualified-final-o2; final native derivative has exact state/timeline/PCM/pixels; no repeat handoff",
+      "final16_frame_work_max_ms": 3.5186
+    }
+  },
+  "source_sha256": {
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\generated\\sonic1sms_dispatch.c": "7b1ae5936b2bbb2186445da9f02c2e3a7004dee9c49e4c9b4409ba081e219176",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\generated\\sonic1sms_full.c": "e1b0b228727e3679cc354f751d09af5b7fcfa0a5f3ad3fd714887608a262ce0b",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\generated\\sonic1sms_funcs.h": "8f99c42b3938792742f5a0885486693e82248586a1dc43f6c0f3c43b2456cf20",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\generated\\sonic1sms_layout.c": "0a216d6297b70f8da53df2e9334f97fff98f79e50e6aac1bd89990a023c9c411",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\game.toml": "99897f9c4b2c5ee90e81ebe6af30529689e35cd4e0aa15849433fe732fde258a",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\build.ps1": "3d2247f527d0752021bd14e19aa8738f0f8289b0941c218bc350936dbf264079",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\dispatch_manifest.txt": "4d685ab645ae484ee4c2a587e2e6571359d5924a7ce8e3ad3bbb71ff7aaefca4",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\generated\\sonicblast_dispatch.c": "4fd708f00c6c955d26f82aa09ee2f19330c5b971d03a6e93757affb34639c18b",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\generated\\sonicblast_full.c": "dd346d35ad88b038fc424110543d86c9c6610241b83d34ef32d400829b74a8d2",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\generated\\sonicblast_funcs.h": "c52b7c82b5987e223e041a5779585f39a96b682c6310fc2a848504aa3d99a066",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\generated\\sonicblast_layout.c": "b9f04681ac10b892f7b7617108456c6c2ce6189e84462025a2fb3ff2230235b6",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\game.toml": "036c762e94314ea6b9cf08ed5331e4f8b99196994eb71b7236a4d7a3cc7ecee8",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\build.ps1": "1d818185f3643cdee777ffe29c4dbf0bb901d15fb2fe79c75c7bbe515fd0100a",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\dispatch_manifest.txt": "79d106900ef89a7fd37fcbaa47d7fc3a8f379d1d6b430537aa35317f1f3d2449",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\code_generator.c": "25343c74d377298f57f7d499c7395de935c24fa709d3ef6d95f681d2080878bd",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\code_generator.h": "1b1fad8d2a52a3ad3dd902a02f7dd97aad21639d4f6dc30c115ee291730abda0",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\function_finder.c": "2d675b1a9c3bc5200e43c15cb5eaec78b3b1c176eece00f1d93ee26a5bfc3792",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\function_finder.h": "941e5222229859ee4810b8c0f6ee007e1070376dfa70b627222c133738c73030",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\game_config.c": "7d54fb07df1d40db52b43fa040ca2d4c9ec06617eb65c97e7f77d41b95504c40",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\game_config.h": "b615ad7b1397c4e96a507122ecbe0d6d16142ac0f62f9607474e11ccc08910bf",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\main_sms.c": "c2630ee7b903f56ee27f12a92701930d3a96999faa297c970df67e27447df92f",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\rom_parser.c": "ce0e7143d5e84ea375e28e988122407f98e8309eb16aaef4696cface765deeb9",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\rom_parser.h": "c1635339e2641c17ec7045ad7063a6eb377e8149c4726c9c404b3863edc7dcb7",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\toml.c": "1ed386df52a6d7a9ee8341c35af6689e15ecc78e053e246ede1a2eb937171e26",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\toml.h": "54743ee323a09a99f53e409de0e14890db0bd5afcd5ac7f0b867e6e238eb594a",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\z80_decoder.c": "bcf711dc4139f2188d3b27543562790941486cb950a5cefc26af5f1523728540",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\recompiler\\src\\z80_decoder.h": "9484b3630560cf9d4fbe7dffa360f1c1d4b511d7c43e94542f3a8524b04a3106",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\audio\\sn76489.c": "f1338168e915b4b6006883d302784a2f7a0400bb988e4b9c6b521a0e276bcd3a",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\audio\\sn76489.h": "6cd04ba4236cdad127e304f4b4d86aacc7629537e41d7fcc33544963d06330f7",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\external\\superzazu\\z80.c": "a09a9c662d83a2112403dd3dca4fab44ae04b7f5942223852c4e2fe6a284b41d",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\external\\superzazu\\z80.h": "d27e46daf7d3c661ace78918fe5315632bc82c79e351126709c541b80e01f5aa",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\game_layout.h": "775aa05ab95563e5c85d771eca31721a866e8091138d18539608f63fc150105c",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\game_spec.h": "123b77f1351ed9b28d6a6f46c7eb2c27e07dec96b25298dfdd183c44b08b41f7",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\glue.c": "749a2d645e3c863d678a61b538a11f998ff961cc435519402cdc0500e6a48ffb",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\glue.h": "f5ec4c5db907d991c81466af6ce369fb9d93d9eb6a787e0b039648a29238aca9",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\host_sdl.c": "eeeeefe48a6fbf508c950728702e2f3ca7fddc1f62ad2599395cf864eda3c6ba",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\host_sdl.h": "db29d82aab4aba07c5fd974ae71c15e1fc9162502c512e35d7392e89b990c0dd",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\include\\sms_clocks.h": "015ed5cb04c58bf7c2e45841abc859827aa768f9d6a6e9694dcb2fcd4abb340e",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\include\\sms_runtime.h": "ddf7ccc5ad6c94d7fee3f32bfe0ab84c5e28944e5932b45243cef59e306119fe",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\include\\z80_ops.h": "d002b5b4406c888940214c82e94379c901e9dc313cbbe134cc39ceaaec23b2f6",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\main.c": "32ab72a7bd4951e1e162def5660f0c20085c7d8cdf941bc4c9452ef9ace94a35",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\png_write.h": "0c34b1c1d91bec199149c04ca65663b8bc7f4572115a1ee407e6c84afb611a7c",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\video\\sms_vdp.c": "a787536a4febafaf6cf6cf424a88b0ff5637d7331bec7b2356f1da055f7609df",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\video\\sms_vdp.h": "bf8a46188dc26a6d2bdb53e6b5f51835635dd53963822ca582d4be6f25eb134c",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\frontend_selftest.c": "09358ac4ae730e3398c63fa35a7d0f2ed435d4588a3e514a3e4928f6671f4e74",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\rom_dump.c": "ed14317ebc5e9f032da33a1da6e019a5c4af7508b9d890d3bbfe54c10cdf5bc2",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\z80_decoder_selftest.c": "1d48ca34bb5a3ece1800e64cf2755cc4b46e92e286634210f1d92ff59965dace",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\z80_ops_selftest.c": "63a8ad7508a58e18826c456a96872a59c292b1a5e5b6754e3b00025933d70d28",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\host_gl.c": "7397e3a472a85b2c2535f50bf1b3f947368aafbae1ad066cd4a98e7bca02d020",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\host_gl.h": "47ebcab0da0b92f496756805d1c471fe48f3995f1ea4d3ae2f5936dbe7cfb6df",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\bus_selftest.c": "c29add98161b0e6f1393ffad3f21a1e2d943d0763f2c5f89ddb6fce33b7e2beb",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\generator_bank_selftest.c": "544d9a7b9accc0d572a06d420b03af495b38758a6c0a815866e9fc86889b45d6",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\gpu_jobs_selftest.c": "bf09c937002b86b93971a7349b8e233f5f0b6ce660b3c9b6bc291c28accb50e8",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\reference_present_selftest.c": "0af66b5648c7888736dd8326611ba0925e3ccc4ebe652d615f82fe776ffff681",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\vdp_jobs_selftest.c": "b9418db0cc2b53b9c3be139f6bc6b0259df93901122f2d9a95525b4cc28bb7e9",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\external\\z80-recomp-core\\include\\sms_runtime.h": "800e4dea7f7b3dba1e1557006fc4a0cdc394c1890bebe706f32fe0738ff0de6f",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\external\\z80-recomp-core\\include\\z80_ops.h": "a862091611b28f15aa9337a6b4fcb86f4923154955861722aad3dda4291c3217",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\native_hooks_selftest.c": "01f565bcfdfad3ef4a6b991ee46d4fa28b4d952b1f43d9b63d249677f50caf63",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\native_spans_selftest.c": "1418b6e5723437b8312bdda4d7ff41606ae059e46ff0b2378b447f66bf2f0c46",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\tests\\psg_block_selftest.c": "10cfd395f044a05f8efc7a4b07f61dc2a1f35ddd3ec16f859af2c5ae06cac68a"
+  },
+  "test_results": {
+    "cpu_jobs": "512 snapshot + 16 changing raster cases; Windows, Ubuntu and physical Steam Deck",
+    "gpu_jobs": "48 full-pixel cases through16x; reset, resize, source mutation, context recreation and repeated report stability",
+    "bus": "all 256 bank values, fixed 1KiB, RAM mirrors, odd image lengths, reload",
+    "generator": "IX/IY tables, cross-bank table/trace bounds, executable singleton live-bank regression",
+    "reference": "native scalar presentation even when SMS_GPU and SMS_VDP_REFERENCE are both defined",
+    "fallback": "unsupported OpenGL reports native effective1x and completes normally",
+    "game_routes": "Final native package: both6000-frame routes exact state/timeline/PCM to owner-accepted binaries; every16x GPU pixel exact; zero dispatch misses; upload totals unchanged",
+    "native_hooks": "100000 reference boundaries in both generated-contract and legacy-PC modes",
+    "native_spans": "4096 full-state/R/EI/event comparisons, Windows and Ubuntu",
+    "psg": "56309 full-state/PCM comparisons, Windows and Ubuntu; current-build save/load and invalid input"
+  },
+  "heads": {
+    "F:\\Projects\\smsggrecomp\\smsggrecomp": "224d5bb2c150a2c295033d35dec629ef9ee42940",
+    "F:\\Projects\\smsggrecomp\\smsggrecomp\\external\\z80-recomp-core": "0e6606a41245d54c5fd0c3dc322ef9d6890d3923",
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS": "1058d49e7527d35d6fd5bb208ec6eb44da8bc72e",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG": "aa25dbc92b722b179c91832a91a15ebba8d064d1"
+  },
+  "rom_sha256": {
+    "F:\\Projects\\smsggrecomp\\SonicTheHedgehogSMS\\sonicthehedgehog.sms": "6ad738965ece231427ee046b9905cfee470d5c01220afdd934da4673e4a2458b",
+    "F:\\Projects\\smsggrecomp\\SonicBlastGG\\sonicblast.gg": "33aaa56db26ba21e5654d168d9d558239998ca9881229f76c926e6f9aa55e663"
+  },
+  "post_qualification_compatibility_guard": {
+    "file": "F:\\Projects\\smsggrecomp\\smsggrecomp\\runner\\host_sdl.c",
+    "qualified_sha256": "59af9d700e3503e32eca4c173a12efc7d786edba4ba28d1d3a1e569c1211b2ac",
+    "current_sha256": "eeeeefe48a6fbf508c950728702e2f3ca7fddc1f62ad2599395cf864eda3c6ba",
+    "SMS_GPU_preprocessed_tokens_identical": true,
+    "legacy_SDL_without_host_gl_translation_unit": "compiled and ran successfully"
+  },
+  "scope_correction_2026_11_02": {
+    "qualified": "Selected native bus/compiler, tile-row rendering, GPU16x and audio-publication package only; measurements remain valid",
+    "rule": "Implementation and measured qualification or evidence-backed rejection; no new general tooling/inventory project",
+    "remaining_at_correction": [
+      "B1 diagnostic and instruction bookkeeping cost disposition",
+      "B2 native execution/dispatch/instruction boundaries and scheduler/event advancement",
+      "B5 deeper PSG block/event synthesis evaluation",
+      "B7 final combined qualification and owner handoff after remaining work"
+    ],
+    "resolution": "All listed areas evaluated and qualified in native-final-o2; owner visual checks passed; no remaining area in approved two-pilot scope."
+  },
+  "owner_visual_checks": {
+    "SMS": "pass",
+    "GG": "pass",
+    "date": "2026-11-02",
+    "evidence": "Owner message: visual checks pass btw",
+    "repeat_required": false
+  },
+  "remaining_evaluation_raw": "G:/Temp/Codex/smsgg-host-20261101/remaining-results.json",
+  "remaining_evaluation_status": "Complete: native hooks/dispatch/events/register spans and PSG each evaluated; final combined package passes per-game nonregression, exact state/PCM/pixels and16x headroom.",
+  "remaining_areas": [],
+  "ready_to_test_queue": [],
+  "initial_package_metrics": {
+    "SonicTheHedgehogSMS": {
+      "native": {
+        "route_cpu_ms_per_frame_baseline": 0.46875,
+        "route_cpu_ms_per_frame_candidate": 0.40625,
+        "route_cpu_reduction_percent": 13.33333333333333,
+        "total_cpu_ms_baseline": 3046.875,
+        "total_cpu_ms_candidate": 2500.0,
+        "wall_ms_baseline": 3032.0000000065193,
+        "wall_ms_candidate": 2485.000000015134,
+        "whole_native_disposition": "positive"
+      },
+      "binary_sha256": "bedbae34d14f1db2edffea06a5f70562287b58578c4a3daafc83c30fea56d2c6",
+      "gpu_p95_ms": 0.314368,
+      "frame_work_p95_ms": 6.4953
+    },
+    "SonicBlastGG": {
+      "native": {
+        "route_cpu_ms_per_frame_baseline": 0.640625,
+        "route_cpu_ms_per_frame_candidate": 0.5625,
+        "route_cpu_reduction_percent": 12.195121951219512,
+        "total_cpu_ms_baseline": 3593.75,
+        "total_cpu_ms_candidate": 3515.625,
+        "wall_ms_baseline": 3812.999999994645,
+        "wall_ms_candidate": 3842.9999999934807,
+        "whole_native_disposition": "neutral/inconclusive"
+      },
+      "binary_sha256": "e2ed732e096d1b4a4f34c8695945691d574f3a4670e5d3766c010b521d7cbfe6",
+      "gpu_p95_ms": 0.109568,
+      "frame_work_p95_ms": 1.1931
+    }
+  },
+  "native_candidate_decisions": [
+    {
+      "candidate": "Production instruction hooks / conditional PC publication",
+      "decision": "accepted neutral-to-positive in measured package",
+      "evidence": "100000 reference boundary comparisons in generated-contract and legacy modes; complete per-game state/PCM parity. Retain entry breadcrumbs; reference build retains instruction diagnostics."
+    },
+    {
+      "candidate": "Live-bank guarded native calls",
+      "decision": "accepted neutral/inconclusive isolated timing; safe direct path retained",
+      "evidence": "Separate 3-sample built-game arms; adversarial mapper test proves fallback when static bank differs from live bank."
+    },
+    {
+      "candidate": "Quiet IRQ event jobs",
+      "decision": "accepted neutral-to-positive in measured package",
+      "evidence": "Preserve PSG advancement at exact original instruction boundaries; skip impossible raster/frame/IRQ-accept work only before next line with IFF1 clear. Both routes exact."
+    },
+    {
+      "candidate": "Register-only native execution spans",
+      "decision": "accepted neutral/inconclusive in both games; no isolated speedup claim",
+      "evidence": "4096 state/R/EI/deadline comparisons on Windows and Ubuntu; original instruction path retained near deadline/after EI. Separate 3-pair built-game samples in native-final-results.json."
+    },
+    {
+      "candidate": "Native PSG constant-output/event spans and cached stereo mix",
+      "decision": "accepted positive in both isolated game arms; exact PCM",
+      "evidence": "56309 full-state/PCM component comparisons, directed period1/mute/noise/stereo/save-load/truncated states, Windows/Ubuntu. Separate built-game PSG arm improves all3 route samples in both games."
+    },
+    {
+      "candidate": "Further interpreter optimization",
+      "decision": "rejected for this campaign workload: cold",
+      "evidence": "Both accepted6000-frame routes execute 100% static with zero interpreter calls/cycles and zero dispatch misses; no attributable runtime work to remove."
+    },
+    {
+      "candidate": "Defer PSG advancement / interrupt sampling across observable boundaries",
+      "decision": "rejected for correctness",
+      "evidence": "PSG port writes consume timing established by sync, and EI must preserve exact IRQ sampling. Qualified fast event jobs retain those boundaries. HALT already advances to deadlines; active raster capture remains necessary."
+    }
+  ],
+  "native_evidence": {
+    "raw_pairs": "G:\\Temp\\Codex\\smsgg-host-20261101\\native-final-results.json",
+    "individual_arms": "G:\\Temp\\Codex\\smsgg-host-20261101\\remaining-results.json",
+    "source_binary_identities": "G:\\Temp\\Codex\\smsgg-host-20261101\\native-source.json",
+    "capacity": "G:\\Temp\\Codex\\smsgg-host-20261101\\native-final-capacity.json",
+    "reference_build": "native-reference-o2: normal consumer build.ps1 -ReferenceExecution -PortableDisplay;6000-frame state/timeline/PCM exact; production diagnostic request exits2",
+    "regeneration": "Installed recompiler regenerates both complete generated input sets byte-identically",
+    "linux": "Full native SMS portable headless build:6000 frames, no misses/interpreter calls; all binary guest dumps and native PNG exact; text dumps/CSV differ only by OS newlines; WAV SHA256 exact. Temporary Linux executable/WAV removed."
+  },
+  "cleanup": "Removed unqualified span preparation builds and Python cache; final/reference temporary WAVs absent; Ubuntu executable/WAV removed. Required baselines, samples, source/binary identities and qualified builds retained in raw_root."
+}

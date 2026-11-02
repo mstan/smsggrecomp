@@ -50,6 +50,9 @@ void funclist_free(FuncList *fl);
 /* Add or merge a function entry; returns the index. */
 int  funclist_add(FuncList *fl, uint16_t addr, int bank, const char *name, uint8_t source, bool is_entry);
 int  funclist_find(const FuncList *fl, uint16_t addr, int bank);
+/* Visible boundaries for a trace's physical ROM mapping; limit is a snapshot
+ * of fl->count and also the output capacity. Other-bank aliases never cut code. */
+int ff_visible_entries(const FuncList *fl,uint16_t start,int bank,uint16_t *out,int limit);
 
 /* Seed list with vectors + configured extras, then walk reachable code. The
  * blacklist marks promoted-but-not-code addresses to drop. */

@@ -13,9 +13,10 @@ void funclist_free(FuncList *fl){ free(fl->items); fl->items=NULL; fl->count=fl-
 
 /* Any discovered entry at this address, regardless of bank (code-vs-data oracle
  * for dense jump-table bounding: a table cannot extend across known code). */
-static bool funclist_has_code(const FuncList *fl, uint16_t addr){
+static bool funclist_has_code(const FuncList *fl, uint16_t addr,int bank){
     for (int i=0;i<fl->count;i++)
-        if (fl->items[i].addr==addr && fl->items[i].is_entry) return true;
+        if (fl->items[i].addr==addr && fl->items[i].is_entry &&
+            (addr<0x400 || (fl->items[i].bank>=0?fl->items[i].bank:addr>>14)==bank)) return true;
     return false;
 }
 int funclist_find(const FuncList *fl, uint16_t addr, int bank){
@@ -52,6 +53,17 @@ void ff_seed_vectors(FuncList *fl){
         char nm[16]; snprintf(nm,sizeof(nm),"rst_%02X",Z80_RST_VECTORS[i]);
         funclist_add(fl, Z80_RST_VECTORS[i], -1, nm, FUNC_SRC_VECTOR, true);
     }
+}
+int ff_visible_entries(const FuncList *fl,uint16_t start,int bank,uint16_t *out,int limit){
+    int n=0;
+    for(int i=0;i<limit && i<fl->count;i++){
+        const FuncEntry *f=&fl->items[i];if(!f->is_entry)continue;
+        int slot=f->addr>>14;
+        int expected=f->addr<0x400?0:((slot==(start>>14)&&bank>=0)?bank:slot);
+        int actual=f->addr<0x400?0:(f->bank>=0?f->bank:slot);
+        if(expected==actual)out[n++]=f->addr;
+    }
+    return n;
 }
 
 /* ---- tracer ---- */
@@ -568,7 +580,14 @@ static JtDetect detect_jump_table(const TraceResult *t, int k){
     bool has_cp=false; int cpv=0;
     for (int j=bstart;j<loadidx;j++){
         const Z80Insn *in=&t->insns[j].insn;
-        if (in->prefix!=Z80_PFX_NONE){ if (insn_clobbers_a(in)) a_idx=false; continue; }
+        if (in->prefix!=Z80_PFX_NONE){
+            /* Indexed object-state loads are indexes too. Treating LD A,(IX+d)
+             * as an opaque A clobber discarded otherwise proven ROM tables. */
+            if((in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD) && in->opcode==0x7e){
+                a_idx=true;ilo=0;ihi=255;ibounded=false;has_cp=false;
+            } else if(insn_clobbers_a(in)) a_idx=false;
+            continue;
+        }
         uint8_t op=in->opcode;
         switch (op){
         case 0x08: {                                              /* ex af,af' : swap index status */
@@ -651,7 +670,7 @@ static int ff_seed_jt(const SmsRom *rom, FuncList *fl, const TraceResult *t, int
         /* dense: the table cannot extend across an address that is itself known
          * code (a discovered dispatcher/handler) — common when pointer tables
          * are interleaved with code. Bound the table there. */
-        if (!d.proven && e>0 && funclist_has_code(fl, ea)){ code_end=ea; have_code_end=true; break; }
+        if (!d.proven && e>0 && funclist_has_code(fl, ea,tbank)){ code_end=ea; have_code_end=true; break; }
         size_t off=rom_z80_to_offset(rom, ea, tbank);
         if (off==SIZE_MAX || off+1>=rom->size) break;
         uint16_t T=(uint16_t)(rom_read_offset(rom,off) | (rom_read_offset(rom,off+1)<<8));
@@ -835,7 +854,6 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
         /* snapshot current entry addresses for the "external" set */
         int n = fl->count;
         uint16_t *entries = (uint16_t*)malloc((size_t)(n>0?n:1)*sizeof(uint16_t));
-        for (int i=0;i<n;i++) entries[i]=fl->items[i].addr;
 
         for (int i=0;i<n;i++){
             if (!fl->items[i].is_entry) continue;
@@ -843,7 +861,8 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
             int bank = fl->items[i].bank;
             if (in_blacklist(blacklist,blacklist_count,start)) continue;
             TraceResult tr;
-            trace_function(rom, start, bank, entries, n, &tr);
+            int visible=ff_visible_entries(fl,start,bank,entries,n);
+            trace_function(rom, start, bank, entries, visible, &tr);
             detect_pager(&tr, start);   /* register A->slot mapper helpers for call propagation */
             /* Track all three slot banks via the contiguous
              * `ld a,#imm ; ld ($FFFD/$FFFE/$FFFF),a` idiom (linear address-order

@@ -14,13 +14,43 @@
 #include <SDL.h>
 #include "host_sdl.h"
 #include "glue.h"       /* SMS_PAD_* bit constants (the controller contract) */
+#ifdef SMS_GPU
+#include "host_gl.h"
+#endif
 
 #include <stdio.h>
+#include <stdlib.h>
 
 static SDL_Window   *g_win;
 static SDL_Renderer *g_ren;
 static SDL_Texture  *g_tex;
 static SDL_Rect      g_src;     /* crop region of the framebuffer */
+static int g_internal_scale;
+static bool g_hidden,g_gpu;
+bool host_uses_gpu(void){return g_gpu;}
+static double g_work_ms[8192];
+static unsigned g_work_count;
+static uint64_t g_work_start;
+static int compare_ms(const void *a,const void *b){double x=*(const double*)a,y=*(const double*)b;return(x>y)-(x<y);}
+void host_set_internal_scale(int s){g_internal_scale=s;}
+void host_set_hidden(bool h){g_hidden=h;}
+void host_report(FILE *f){
+    qsort(g_work_ms,g_work_count,sizeof g_work_ms[0],compare_ms);
+    fprintf(f,"{\"work_samples\":%u,\"frame_work_p95_ms\":%.6f,\"frame_work_max_ms\":%.6f,\"renderer\":",
+        g_work_count,g_work_count?g_work_ms[(g_work_count-1)*95/100]:0,g_work_count?g_work_ms[g_work_count-1]:0);
+#ifdef SMS_GPU
+    if(g_gpu)host_gl_report(f);else
+#endif
+    fputs("{\"gpu\":false,\"effective_scale\":1}",f);
+    fputs("}\n",f);
+}
+bool host_dump_gpu(const char *p){
+#ifdef SMS_GPU
+    return g_gpu&&host_gl_dump(p);
+#else
+    (void)p;return false;
+#endif
+}
 
 bool host_init(int fb_w, int fb_h,
                int crop_x, int crop_y, int crop_w, int crop_h,
@@ -31,11 +61,28 @@ bool host_init(int fb_w, int fb_h,
         return false;
     }
     if (scale < 1) scale = 1;
+    g_work_count=0;g_work_start=0;
     g_src.x = crop_x; g_src.y = crop_y; g_src.w = crop_w; g_src.h = crop_h;
 
+    Uint32 flags=g_hidden?SDL_WINDOW_HIDDEN:SDL_WINDOW_SHOWN;
+#if defined(SMS_GPU) && !defined(SMS_VDP_REFERENCE)
+    if(g_internal_scale>0){
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_CORE);
+    g_win=SDL_CreateWindow(title?title:"SMS/GG",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
+        crop_w*scale,crop_h*scale,flags|SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
+    if(g_win){
+        g_gpu=host_gl_init(g_win,crop_x,crop_y,crop_w,crop_h,g_internal_scale);
+        if(g_gpu)return true;
+        SDL_DestroyWindow(g_win);g_win=NULL;
+    }
+    fprintf(stderr,"[host] GPU unavailable; portable native presentation: %s\n",SDL_GetError());
+    }
+#endif
     g_win = SDL_CreateWindow(title ? title : "SMS/GG recompiled",
                              SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                             crop_w * scale, crop_h * scale, SDL_WINDOW_SHOWN);
+                             crop_w * scale, crop_h * scale, flags|SDL_WINDOW_RESIZABLE);
     if (!g_win){ fprintf(stderr, "[host] CreateWindow: %s\n", SDL_GetError()); return false; }
 
     /* No PRESENTVSYNC: the wall-clock limiter (host_set_frame_cap) owns pacing,
@@ -105,11 +152,16 @@ static void host_pace(void){
 }
 
 bool host_present(const uint32_t *fb, int fb_w, int fb_h){
+#ifdef SMS_GPU
+    if(g_gpu)host_gl_present(vdp_frame_jobs());else
+#endif
+    {
     if (!g_tex) return false;
     SDL_UpdateTexture(g_tex, NULL, fb, fb_w * (int)sizeof(uint32_t));
     SDL_RenderClear(g_ren);
     SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
     SDL_RenderPresent(g_ren);
+    }
     (void)fb_h;
 
     bool quit = false;
@@ -124,11 +176,18 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         }
     }
 
+    uint64_t end=SDL_GetPerformanceCounter();
+    if(g_work_start && g_work_count<8192)g_work_ms[g_work_count++]=(end-g_work_start)*1000.0/SDL_GetPerformanceFrequency();
     host_pace();      /* hold the loop to realtime (display-refresh-independent) */
+    g_work_start=SDL_GetPerformanceCounter();
     return !quit;
 }
 
 void host_shutdown(void){
+#ifdef SMS_GPU
+    host_gl_shutdown();
+#endif
+    g_gpu=false;
     if (g_tex) SDL_DestroyTexture(g_tex);
     if (g_ren) SDL_DestroyRenderer(g_ren);
     if (g_win) SDL_DestroyWindow(g_win);

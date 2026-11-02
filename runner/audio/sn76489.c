@@ -124,6 +124,7 @@ static int sn_noise_reload(const SN76489 *p)
 /* Advance all four channels by one frame, returning each channel's signed
  * amplitude in amp[0..3] (tone0, tone1, tone2, noise). The per-frame state
  * mutation (counters, flip-flops, LFSR) happens here exactly once. */
+#ifdef SMS_PSG_REFERENCE
 static inline void sn_tick(SN76489 *p, int32_t amp[4])
 {
     for (int i = 0; i < 3; i++) {
@@ -144,6 +145,7 @@ static inline void sn_tick(SN76489 *p, int32_t amp[4])
     }
     amp[3] = p->noise_out ? SN_VOL[p->vol[3]] : -SN_VOL[p->vol[3]];
 }
+#endif
 
 static inline int16_t sn_lpf(int32_t mix, int32_t *y, int32_t *prev)
 {
@@ -158,6 +160,7 @@ static inline int16_t sn_lpf(int32_t mix, int32_t *y, int32_t *prev)
 }
 
 /* Render one stereo frame, applying the GG stereo routing mask. */
+#ifdef SMS_PSG_REFERENCE
 static void sn_render_frame(SN76489 *p, int16_t *l, int16_t *r)
 {
     int32_t amp[4];
@@ -173,10 +176,132 @@ static void sn_render_frame(SN76489 *p, int16_t *l, int16_t *r)
     *l = sn_lpf(mixL, &p->lpf_yL, &p->lpf_prevL);
     *r = sn_lpf(mixR, &p->lpf_yR, &p->lpf_prevR);
 }
+#endif
+
+#ifndef SMS_PSG_REFERENCE
+/* Derived host data, never serialized: output bits select one of sixteen
+ * exact signed stereo mixes. Only volume or routing changes invalidate it. */
+static int32_t s_mixL[16], s_mixR[16];
+static unsigned s_audible;
+static int s_mono_mix;
+static void sn_prepare_mix(const SN76489 *p)
+{
+    s_audible=0;s_mono_mix=1;
+    for(unsigned bits=0;bits<16;bits++){
+        int32_t l=0,r=0;
+        for(unsigned i=0;i<4;i++){
+            int32_t amp=(bits&(1u<<i))?SN_VOL[p->vol[i]]:-SN_VOL[p->vol[i]];
+            if(p->gg_stereo&(0x10u<<i))l+=amp;
+            if(p->gg_stereo&(1u<<i))r+=amp;
+            if(SN_VOL[p->vol[i]] && (p->gg_stereo&((0x10u<<i)|(1u<<i))))s_audible|=1u<<i;
+        }
+        s_mixL[bits]=l;s_mixR[bits]=r;
+        if(l!=r)s_mono_mix=0;
+    }
+}
+static void sn_clock(SN76489 *p)
+{
+    for(unsigned i=0;i<3;i++)if(--p->tone_counter[i]<=0){
+        p->tone_counter[i]=p->tone_period[i]?p->tone_period[i]:1;
+        p->tone_out[i]^=1;
+    }
+    if(--p->noise_counter<=0){
+        p->noise_counter=sn_noise_reload(p);
+        uint16_t fb=(p->noise_ctrl&4)?((p->lfsr^(p->lfsr>>3))&1):(p->lfsr&1);
+        p->lfsr=(uint16_t)((p->lfsr>>1)|(fb<<15));
+        p->noise_out=(uint8_t)(p->lfsr&1);
+    }
+}
+/* Advance unobserved clocks analytically. An inaudible oscillator still has
+ * exactly the same counter/flip-flop state when a later write makes it audible. */
+static void sn_skip_tone(SN76489 *p,unsigned i,unsigned frames)
+{
+    unsigned wait=p->tone_counter[i]>0?(unsigned)p->tone_counter[i]:1;
+    if(frames<wait){p->tone_counter[i]-=(int32_t)frames;return;}
+    unsigned reload=p->tone_period[i]?p->tone_period[i]:1,after=frames-wait;
+    p->tone_counter[i]=(int32_t)(reload-after%reload);
+    p->tone_out[i]^=(uint8_t)((1+after/reload)&1);
+}
+static void sn_skip_noise(SN76489 *p,unsigned frames)
+{
+    unsigned wait=p->noise_counter>0?(unsigned)p->noise_counter:1;
+    if(frames<wait){p->noise_counter-=(int32_t)frames;return;}
+    unsigned reload=(unsigned)sn_noise_reload(p),after=frames-wait,edges=1+after/reload;
+    p->noise_counter=(int32_t)(reload-after%reload);
+    while(edges--){
+        uint16_t fb=(p->noise_ctrl&4)?((p->lfsr^(p->lfsr>>3))&1):(p->lfsr&1);
+        p->lfsr=(uint16_t)((p->lfsr>>1)|(fb<<15));
+    }
+    p->noise_out=(uint8_t)(p->lfsr&1);
+}
+static void sn_filter_span(SN76489 *p,int16_t *out,size_t frames,int32_t l,int32_t r)
+{
+    if(!l && !r && !p->lpf_yL && !p->lpf_yR && !p->lpf_prevL && !p->lpf_prevR){
+        memset(out,0,frames*2*sizeof *out);return;
+    }
+    if(l==r && p->lpf_yL==p->lpf_yR && p->lpf_prevL==p->lpf_prevR){
+        int32_t y=p->lpf_yL,prev=p->lpf_prevL;
+        for(size_t i=0;i<frames;i++){
+            int16_t sample=sn_lpf(l,&y,&prev);out[i*2]=out[i*2+1]=sample;
+        }
+        p->lpf_yL=p->lpf_yR=y;p->lpf_prevL=p->lpf_prevR=prev;
+    }else{
+        for(size_t i=0;i<frames;i++){
+            out[i*2]=sn_lpf(l,&p->lpf_yL,&p->lpf_prevL);
+            out[i*2+1]=sn_lpf(r,&p->lpf_yR,&p->lpf_prevR);
+        }
+    }
+}
+static void sn_render_block(SN76489 *p,int16_t *out,size_t frames)
+{
+    /* An audible reload-1 oscillator makes every sample an event. Use the
+     * same cached native mixer directly rather than searching for empty spans. */
+    int every_sample=0;
+    for(unsigned i=0;i<3;i++)if((s_audible&(1u<<i)) && p->tone_period[i]<=1 && p->tone_counter[i]<=1)every_sample=1;
+    if(every_sample){
+        if(s_mono_mix && p->lpf_yL==p->lpf_yR && p->lpf_prevL==p->lpf_prevR){
+            int32_t y=p->lpf_yL,prev=p->lpf_prevL;
+            for(size_t i=0;i<frames;i++){
+                sn_clock(p);
+                unsigned bits=p->tone_out[0]|(p->tone_out[1]<<1)|(p->tone_out[2]<<2)|(p->noise_out<<3);
+                int16_t sample=sn_lpf(s_mixL[bits],&y,&prev);out[i*2]=out[i*2+1]=sample;
+            }
+            p->lpf_yL=p->lpf_yR=y;p->lpf_prevL=p->lpf_prevR=prev;
+        }else{
+            for(size_t i=0;i<frames;i++){
+                sn_clock(p);
+                unsigned bits=p->tone_out[0]|(p->tone_out[1]<<1)|(p->tone_out[2]<<2)|(p->noise_out<<3);
+                out[i*2]=sn_lpf(s_mixL[bits],&p->lpf_yL,&p->lpf_prevL);
+                out[i*2+1]=sn_lpf(s_mixR[bits],&p->lpf_yR,&p->lpf_prevR);
+            }
+        }
+        return;
+    }
+    while(frames){
+        sn_clock(p);
+        unsigned bits=p->tone_out[0]|(p->tone_out[1]<<1)|(p->tone_out[2]<<2)|(p->noise_out<<3);
+        size_t span=frames;
+        /* This first sample has already clocked. Outputs remain constant for
+         * counter-1 more samples. Muted channels do not split the audio job. */
+        for(unsigned i=0;i<3;i++)if((s_audible&(1u<<i)) && (size_t)p->tone_counter[i]<span)span=(size_t)p->tone_counter[i];
+        if((s_audible&8) && (size_t)p->noise_counter<span)span=(size_t)p->noise_counter;
+        if(span>1){
+            unsigned skipped=(unsigned)(span-1);
+            for(unsigned i=0;i<3;i++)sn_skip_tone(p,i,skipped);
+            sn_skip_noise(p,skipped);
+        }
+        sn_filter_span(p,out,span,s_mixL[bits],s_mixR[bits]);
+        out+=span*2;frames-=span;
+    }
+}
+#endif
 
 void psg_init(void)
 {
     sn_reset(&s_sn);
+#ifndef SMS_PSG_REFERENCE
+    sn_prepare_mix(&s_sn);
+#endif
     s_scratch_write = s_scratch_read = 0;
     s_leftover_z80_cycles = 0;
     s_inited = 1;
@@ -195,10 +320,14 @@ void psg_advance(uint32_t cycles_z80)
         size_t avail = PSG_SCRATCH_FRAMES - s_scratch_write;
         if (avail == 0) return;  /* scratch full; drop (no sink draining) */
         size_t chunk = frames_to_emit < avail ? frames_to_emit : avail;
+#ifdef SMS_PSG_REFERENCE
         for (size_t i = 0; i < chunk; i++)
             sn_render_frame(&s_sn,
                             &s_scratch[(s_scratch_write + i) * 2],
                             &s_scratch[(s_scratch_write + i) * 2 + 1]);
+#else
+        sn_render_block(&s_sn,&s_scratch[s_scratch_write*2],chunk);
+#endif
         s_scratch_write += chunk;
         frames_to_emit  -= chunk;
     }
@@ -207,13 +336,24 @@ void psg_advance(uint32_t cycles_z80)
 void psg_write(uint8_t value)
 {
     if (!s_inited) psg_init();
+#ifndef SMS_PSG_REFERENCE
+    unsigned latched=(value&0x80)?(value>>4)&7:s_sn.latch;
+    int remix=(latched&1) && s_sn.vol[latched>>1]!=(value&15);
+#endif
     sn_write(&s_sn, value);
+#ifndef SMS_PSG_REFERENCE
+    if(remix)sn_prepare_mix(&s_sn);
+#endif
 }
 
 void psg_write_stereo(uint8_t mask)
 {
     if (!s_inited) psg_init();
+    if(s_sn.gg_stereo==mask)return;
     s_sn.gg_stereo = mask;
+#ifndef SMS_PSG_REFERENCE
+    sn_prepare_mix(&s_sn);
+#endif
 }
 
 size_t psg_render(int16_t *out, size_t frame_count)
@@ -234,6 +374,15 @@ size_t psg_render(int16_t *out, size_t frame_count)
 size_t psg_frames_available(void)
 {
     return s_scratch_write - s_scratch_read;
+}
+
+void psg_drain(void (*sink)(const int16_t *, size_t))
+{
+    size_t available=s_scratch_write-s_scratch_read;
+    if(sink && available){
+        sink(&s_scratch[s_scratch_read*2],available);
+        s_scratch_write=s_scratch_read=0;
+    }
 }
 
 uint32_t psg_sample_rate(void)
@@ -261,8 +410,21 @@ int psg_save_state(FILE *f)
 int psg_load_state(FILE *f)
 {
     if (!s_inited) psg_init();
-    if (fread(&s_sn, sizeof s_sn, 1, f) != 1) return 0;
-    if (fread(&s_leftover_z80_cycles, sizeof s_leftover_z80_cycles, 1, f) != 1) return 0;
+    SN76489 loaded;uint32_t leftover;
+    if(fread(&loaded,sizeof loaded,1,f)!=1 || fread(&leftover,sizeof leftover,1,f)!=1)return 0;
+    /* Derived table indices and filter arithmetic must never trust malformed
+     * input. Valid current-build states use these ranges, including period 0. */
+    for(unsigned i=0;i<3;i++)if(loaded.tone_period[i]>1023 || loaded.tone_counter[i]<1 ||
+        loaded.tone_counter[i]>1023 || loaded.tone_out[i]>1)return 0;
+    for(unsigned i=0;i<4;i++)if(loaded.vol[i]>15)return 0;
+    if(loaded.noise_ctrl>7 || loaded.noise_counter<1 || loaded.noise_counter>1023 ||
+       loaded.noise_out>1 || loaded.latch>7 || leftover>=PSG_FRAME_DIVISOR_Z80 ||
+       loaded.lpf_yL< -32768 || loaded.lpf_yL>32767 || loaded.lpf_yR< -32768 || loaded.lpf_yR>32767 ||
+       loaded.lpf_prevL< -32764 || loaded.lpf_prevL>32764 || loaded.lpf_prevR< -32764 || loaded.lpf_prevR>32764)return 0;
+    memcpy(&s_sn,&loaded,sizeof s_sn);s_leftover_z80_cycles=leftover;
+#ifndef SMS_PSG_REFERENCE
+    sn_prepare_mix(&s_sn);
+#endif
     s_scratch_read = s_scratch_write = 0;
     return 1;
 }

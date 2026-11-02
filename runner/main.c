@@ -21,6 +21,31 @@
 #include <stdbool.h>
 #include <stdlib.h>
 static bool g_automated_input;
+#include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static bool g_benchmark;
+static int g_press_n;
+static uint64_t g_audio_frames;
+static uint64_t g_benchmark_start;
+static double g_route_cpu=-1;
+static double cpu_seconds(void){
+#ifdef _WIN32
+    FILETIME a,b,k,u; ULARGE_INTEGER x,y;
+    GetProcessTimes(GetCurrentProcess(), &a,&b,&k,&u);
+    x.LowPart=k.dwLowDateTime; x.HighPart=k.dwHighDateTime;
+    y.LowPart=u.dwLowDateTime; y.HighPart=u.dwHighDateTime;
+    return (x.QuadPart+y.QuadPart)*1e-7;
+#else
+    return (double)clock()/CLOCKS_PER_SEC;
+#endif
+}
+static int benchmark_frame(const uint32_t *fb, int w, int h){
+    if(g_route_cpu<0 && glue_frame_count()>=g_benchmark_start)g_route_cpu=cpu_seconds();
+    (void)fb; (void)w; (void)h; return 0;
+}
 
 #ifdef SMS_HAVE_SDL
 #include "host_sdl.h"
@@ -28,6 +53,7 @@ static bool g_automated_input;
 /* Bridge the runner's per-frame callback to the SDL host. Returns nonzero to
  * request shutdown (glue.c then unwinds the run loop). */
 static int sdl_frame_cb(const uint32_t *fb, int w, int h){
+    if(g_benchmark)benchmark_frame(fb,w,h);
     bool keep = host_present(fb, w, h);
     if (!g_automated_input) glue_set_pad1(host_get_pad1());
     return keep ? 0 : 1;
@@ -74,6 +100,7 @@ static void wav_close(void){
 }
 
 static void audio_sink(const int16_t *frames, size_t n){
+    g_audio_frames += n;
     if (g_wav){
         fwrite(frames, 2*sizeof(int16_t), n, g_wav);
         g_wav_data_bytes += (uint32_t)(n * 2 * sizeof(int16_t));
@@ -88,7 +115,6 @@ static void audio_sink(const int16_t *frames, size_t n){
  * Each directive sets player 1's held buttons from its frame until a later one.
  * Deterministic input for automated tests — no window needed. */
 static struct { uint64_t frame; uint8_t mask; } g_press[32];
-static int g_press_n;
 
 static uint8_t press_keys_to_mask(const char *s){
     uint8_t m = 0;
@@ -150,6 +176,11 @@ int main(int argc, char **argv){
     const char *audio_wav = NULL;   /* dump PSG output to this WAV */
     bool mute = false;              /* suppress live SDL audio (window build) */
     const char *route = NULL, *report = NULL;
+    const char *benchmark_out = NULL;
+    const char *gpu_report = NULL, *gpu_dump = NULL;
+    int internal_scale=0; /* ordinary native SDL until internal resolution is requested */
+    bool hidden=false;
+    double start_cpu;
 #ifdef SMS_CYC_WATCH
     const char *cyc_watch_file = NULL; uint16_t cyc_watch_addr = 0;
 #endif
@@ -167,6 +198,18 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--interp")==0) interp = true;
         else if (strcmp(argv[i],"--audio-wav")==0 && i+1<argc) audio_wav = argv[++i];
         else if (strcmp(argv[i],"--mute")==0) mute = true;
+        else if (strcmp(argv[i],"--benchmark")==0) g_benchmark = true;
+        else if (strcmp(argv[i],"--benchmark-start")==0 && i+1<argc) g_benchmark_start=strtoull(argv[++i],NULL,10);
+        else if (strcmp(argv[i],"--benchmark-output")==0 && i+1<argc) benchmark_out=argv[++i];
+        else if (strcmp(argv[i],"--internal-scale")==0 && i+1<argc){
+            internal_scale=(int)strtol(argv[++i],NULL,10);
+            if(internal_scale!=1&&internal_scale!=2&&internal_scale!=4&&internal_scale!=8&&internal_scale!=16){
+                fprintf(stderr,"internal scale must be 1, 2, 4, 8 or 16\n");return 2;
+            }
+        }
+        else if (strcmp(argv[i],"--hidden")==0) hidden=true;
+        else if (strcmp(argv[i],"--gpu-report")==0 && i+1<argc) gpu_report=argv[++i];
+        else if (strcmp(argv[i],"--gpu-dump")==0 && i+1<argc) gpu_dump=argv[++i];
 #ifdef SMS_CYC_WATCH
         else if (strcmp(argv[i],"--cyc-watch")==0 && i+2<argc){
             cyc_watch_addr = (uint16_t)strtoul(argv[++i],NULL,0); cyc_watch_file = argv[++i]; }
@@ -217,6 +260,7 @@ int main(int argc, char **argv){
         glue_set_boundary_callback(coverage_route_frame);
         if (coverage_route_frame(0)){coverage_route_close();return 1;}
     }
+    if (g_benchmark) glue_set_frame_callback(benchmark_frame);
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
     if (psg_log) glue_set_psg_log(psg_log);
@@ -236,6 +280,8 @@ int main(int argc, char **argv){
         (void)win_scale;   /* used only in the SDL block below */
 #ifdef SMS_HAVE_SDL
         /* SMS shows the full 256x192; GG shows a 160x144 centred crop. */
+        host_set_internal_scale(internal_scale);
+        host_set_hidden(hidden);
         int cx = is_gg ? (SMS_SCREEN_W-GG_SCREEN_W)/2 : 0;
         int cy = is_gg ? (SMS_SCREEN_H-GG_SCREEN_H)/2 : 0;
         int cw = is_gg ? GG_SCREEN_W : SMS_SCREEN_W;
@@ -243,7 +289,8 @@ int main(int argc, char **argv){
         if (host_init(SMS_SCREEN_W, SMS_SCREEN_H, cx, cy, cw, ch, win_scale,
                       is_gg ? "Sonic (GG) - recompiled" : "Sonic 1 (SMS) - recompiled")){
             glue_set_frame_callback(sdl_frame_cb);
-            host_set_frame_cap(glue_frame_rate());   /* realtime, refresh-independent */
+            glue_set_native_output(!host_uses_gpu());
+            host_set_frame_cap(g_benchmark ? 0 : glue_frame_rate());
         } else
             fprintf(stderr,"[runner] SDL window init failed; running headless\n");
 #else
@@ -264,8 +311,9 @@ int main(int argc, char **argv){
     if (audio_wav){
         if (wav_open(audio_wav, glue_audio_sample_rate())) audio_on = true;
     }
-    if (audio_on) glue_set_audio_sink(audio_sink);
+    if (audio_on || g_benchmark) glue_set_audio_sink(audio_sink);
 
+    start_cpu = cpu_seconds();
     if (interp){
         fprintf(stderr,"[runner] ORACLE reference mode (superzazu interpreter)\n");
         glue_run_interp();
@@ -273,7 +321,19 @@ int main(int argc, char **argv){
         glue_run();
     }
 
+    if (benchmark_out){
+        FILE *f=fopen(benchmark_out,"w");
+        if (!f){ perror(benchmark_out); return 1; }
+        fprintf(f,"{\"frames\":%llu,\"cpu_ms\":%.6f,\"audio_frames\":%llu,\"dispatch_misses\":%d,\"route_frames\":%llu,\"route_cpu_ms\":%.6f}\n",
+            (unsigned long long)glue_frame_count(),(cpu_seconds()-start_cpu)*1000,
+            (unsigned long long)g_audio_frames,glue_dispatch_miss_count(),
+            (unsigned long long)(glue_frame_count()>g_benchmark_start?glue_frame_count()-g_benchmark_start:0),
+            g_route_cpu>=0?(cpu_seconds()-g_route_cpu)*1000:0);
+        fclose(f);
+    }
 #ifdef SMS_HAVE_SDL
+    if(gpu_report){FILE *f=fopen(gpu_report,"w");if(!f)return 1;host_report(f);fclose(f);}
+    if(gpu_dump&&!host_dump_gpu(gpu_dump)){fprintf(stderr,"GPU dump failed\n");return 1;}
     if (g_audio_live) host_audio_shutdown();
     if (want_window) host_shutdown();
 #endif
