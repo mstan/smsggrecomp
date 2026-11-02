@@ -3,7 +3,12 @@ param(
     [string]$Rom='',
     [string]$Build='build',
     [string]$Sdl='C:\msys64\mingw64',
-    [switch]$SkipRegenerate
+    [switch]$SkipRegenerate,
+    [ValidateSet('O1','O2','O3')][string]$Optimization='O2',
+    [switch]$PortableDisplay,
+    [switch]$ReferenceVDP,
+    [switch]$ReferenceExecution,
+    [ValidateRange(1,8)][int]$Jobs=2
 )
 $ErrorActionPreference='Stop'
 $ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot)
@@ -22,8 +27,11 @@ foreach($name in @('cmake.exe','ninja.exe','gcc.exe')) {
 }
 $options=@('-S',$ProjectRoot,'-B',$buildPath,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release',
     "-DCMAKE_C_COMPILER=$tools/gcc.exe","-DCMAKE_MAKE_PROGRAM=$tools/ninja.exe",
-    "-DCMAKE_PREFIX_PATH=$Sdl","-DSMSGG_ROOT=$frameworkRoot",('-DSMSGG_REGENERATE='+$(if($SkipRegenerate){'OFF'}else{'ON'})))
+    "-DCMAKE_PREFIX_PATH=$Sdl","-DSMSGG_ROOT=$frameworkRoot",('-DSMSGG_REGENERATE='+$(if($SkipRegenerate){'OFF'}else{'ON'})),
+    "-DSMSGG_OPTIMIZATION=$Optimization",('-DSMSGG_ENABLE_GPU='+$(if($PortableDisplay){'OFF'}else{'ON'})),
+    ('-DSMSGG_REFERENCE_VDP='+$(if($ReferenceVDP){'ON'}else{'OFF'})),
+    ('-DSMSGG_NATIVE_EXECUTION='+$(if($ReferenceExecution){'OFF'}else{'ON'})))
 if($Rom) { $options+="-DSMSGG_ROM=$((Resolve-Path -LiteralPath $Rom).Path)" }
 Invoke-Native $cmake $options
-Invoke-Native $cmake @('--build',$buildPath,'--parallel','4')
+Invoke-Native $cmake @('--build',$buildPath,'--parallel',"$Jobs")
 Write-Host "Build ready in $buildPath"

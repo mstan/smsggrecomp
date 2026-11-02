@@ -3,7 +3,8 @@
 Owner-approved scope, 2026-11-01: shared engine, Sonic the Hedgehog SMS and
 Sonic Blast GG. Tracking: `beads-xecp.1.6`, related to `beads-2wy8.1`.
 One bounded helper was authorized for PSG implementation and a focus review.
-No merge, commit or release has been requested.
+Owner authorized commits and v0.0.4 releases on 2026-11-02. Release integration
+and artifact verification are tracked separately in `beads-xecp.1.7`.
 
 **Complete for the approved two-pilot scope, 2026-11-02.** The initial
 rendering package did not exhaust the broader native/HLE work. The follow-up
@@ -78,11 +79,11 @@ were slower and variable and are rejected as the default presentation policy.
 ## Build and use
 
 The two consumer scripts default to qualified O2/native execution and accept
-`-EngineRoot`, `-Output`, `-Optimization`, `-PortableDisplay`, `-ReferenceVDP`
+`-EngineRoot` (alias of `-Framework`), `-Build`, `-Optimization`,
+`-PortableDisplay`, `-ReferenceVDP`
 and `-ReferenceExecution`. The last switch restores original instruction hooks
 and PSG synthesis for diagnostics. It was built through the normal SMS script
-and matches the complete6000-frame state/timeline/PCM. Until an engine commit and
-pin update, use `-EngineRoot F:/Projects/smsggrecomp/smsggrecomp` to build the
+and matches the complete6000-frame state/timeline/PCM. For a sibling engine checkout, use `-EngineRoot F:/Projects/smsggrecomp/smsggrecomp` to build the
 working implementation. Existing pinned older engines still build normally.
 
 `--window 3 --internal-scale 16` selects normal paced 16x presentation;

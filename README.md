@@ -10,7 +10,7 @@ This is **not** an emulator and **not** a hand-port: the game's Z80 machine
 code becomes native C that runs directly; only the surrounding silicon is
 modeled by the runtime.
 
-> **Status: early (v0.0.3) — pre-release, expect bugs.** Two games are in
+> **Status: early (v0.0.4) — pre-release, expect bugs.** Two games are in
 > bring-up: **Sonic the Hedgehog (SMS)** and **Sonic Blast (Game Gear)**. Across
 > the title + attract-demo path exercised so far (~40–60s), both run with no
 > interpreter-fallback dispatch miss (100% static) and have been validated
@@ -45,6 +45,23 @@ dumped ROM and regenerate locally.
 - **Sonic Blast (Game Gear)** —
   [mstan/SonicBlastGGRecomp](https://github.com/mstan/SonicBlastGGRecomp).
   Boots through the intro to the title screen, byte-exact to the oracle. Early.
+
+## Host-native execution and faithful internal resolution
+
+Version 0.0.4 adds native instruction/dispatch/event jobs, exact PSG block
+synthesis, direct ROM windows and shared immutable tile-row rendering jobs.
+OpenGL draws those jobs at up to16x without a CPU enhanced framebuffer or
+scale-dependent uploads. Original tile pixels are preserved: no smoothing or
+invented detail. Both Sonic pilots pass the owner's visual checks and the
+recorded per-game state, PCM, pixel and performance gates.
+
+Game build scripts default to qualified O2/native execution. Use
+`--window 3 --internal-scale 16` for faithful16x output. The ordinary native
+SDL display and portable fallback remain available. Use `-ReferenceExecution`
+for instruction diagnostics, `-ReferenceVDP` for the scalar renderer, or
+`-PortableDisplay` for SDL-only output. See [the burndown record](docs/HOST_HLE_BURNDOWN.md).
+The standalone Windows x64 `SmsRecomp.exe` is available in the engine release;
+it translates supported owned cartridges to C and is not a game launcher.
 
 ## How it works
 
