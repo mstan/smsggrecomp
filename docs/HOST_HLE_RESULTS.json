@@ -332,5 +332,11 @@
     "regeneration": "Installed recompiler regenerates both complete generated input sets byte-identically",
     "linux": "Full native SMS portable headless build:6000 frames, no misses/interpreter calls; all binary guest dumps and native PNG exact; text dumps/CSV differ only by OS newlines; WAV SHA256 exact. Temporary Linux executable/WAV removed."
   },
-  "cleanup": "Removed unqualified span preparation builds and Python cache; final/reference temporary WAVs absent; Ubuntu executable/WAV removed. Required baselines, samples, source/binary identities and qualified builds retained in raw_root."
+  "cleanup": "Removed unqualified span preparation builds and Python cache; final/reference temporary WAVs absent; Ubuntu executable/WAV removed. Required baselines, samples, source/binary identities and qualified builds retained in raw_root.",
+  "release_followup": {
+    "version": "v0.0.4",
+    "record": "RELEASE_v0.0.4.json",
+    "issue": "beads-xecp.1.7",
+    "scope": "Qualified package integrated with latest coverage/ROM-identity code; existing candidate decisions and measurements preserved"
+  }
 }

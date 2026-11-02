@@ -1,0 +1,150 @@
+{
+  "version": "v0.0.4",
+  "issue": "beads-xecp.1.7",
+  "source_integration_base": "a92717dfa2b23dce65023ba7e0685c09bd3e0195",
+  "engine_code_commit": "7fd829521d18718e9fe1270814a2e37413bd77c1",
+  "owner_visual_checks": "Previously passed both games; released derivatives match exact state/PCM/pixels; no repeat handoff",
+  "package_checks": {
+    "SonicTheHedgehogSMS": {
+      "zip": "G:\\Temp\\Codex\\smsgg-host-20261101\\release-v0.0.4\\SonicTheHedgehogSMSRecomp-windows-x64.zip",
+      "sha256": "8c698f84dd60bd35831b7f3c02728a8ccb5c9431886237bca46bc866868d192c",
+      "exe_sha256": "809038406e58795b670f9acf7aa2bdf53809ac7697fef9a23402ecba619a7cb2",
+      "entries": [
+        "LICENSE-SDL2.txt",
+        "LICENSE-superzazu.txt",
+        "Play 16x.cmd",
+        "Play.cmd",
+        "README.txt",
+        "SDL2.dll",
+        "SonicTheHedgehogSMSRecomp.exe"
+      ],
+      "clean_PATH_smoke": "pass"
+    },
+    "SonicBlastGG": {
+      "zip": "G:\\Temp\\Codex\\smsgg-host-20261101\\release-v0.0.4\\SonicBlastGGRecomp-windows-x64.zip",
+      "sha256": "658fbf99b4e13bec6785f78d46876171a5481299b4a223b344b8b4edb504c0a8",
+      "exe_sha256": "e4b1d8257a5d898f92d3e5d648d89e757e28303aeaf74dce24dfd7c17d90f5ed",
+      "entries": [
+        "LICENSE-SDL2.txt",
+        "LICENSE-superzazu.txt",
+        "Play 16x.cmd",
+        "Play.cmd",
+        "README.txt",
+        "SDL2.dll",
+        "SonicBlastGGRecomp.exe"
+      ],
+      "clean_PATH_smoke": "pass"
+    },
+    "SmsRecomp.exe": {
+      "sha256": "04c71e693d31759384c7731bec1db4e701d8c7d8718358bfac77ea540281773c",
+      "imports": [
+        "KERNEL32.dll",
+        "msvcrt.dll"
+      ],
+      "clean_PATH_smoke": "pass"
+    },
+    "source": {
+      "upstream_engine": "a92717dfa2b23dce65023ba7e0685c09bd3e0195",
+      "cmake_builds": [
+        "sms-build",
+        "gg-build",
+        "tool-build"
+      ],
+      "built_engine_code_commit": "7fd829521d18718e9fe1270814a2e37413bd77c1"
+    }
+  },
+  "game_qualification": {
+    "SonicTheHedgehogSMS": {
+      "cases": 29,
+      "zero_fallback": true,
+      "equal_surfaces": 89,
+      "surface_count": 89,
+      "existing_exception": null,
+      "canonical_state_PCM": "exact to qualified native checkpoint",
+      "PCM_sha256": "9f4acb91883f87db442a4dff67e96e487573770a89a94fed569b82b17bcaa778",
+      "gpu16": {
+        "work_samples": 5999,
+        "frame_work_p95_ms": 0.8151,
+        "frame_work_max_ms": 2.8406,
+        "renderer": {
+          "upload_p95_ms": 0.024576,
+          "render_p95_ms": 0.156672,
+          "present_p95_ms": 0.016384,
+          "frames": 6000,
+          "effective_scale": 16,
+          "upload_bytes": 469837200,
+          "gpu_samples": 6000,
+          "gpu_p50_ms": 0.142336,
+          "gpu_p95_ms": 0.193536,
+          "gpu_max_ms": 0.202752,
+          "target_bytes": 50331648
+        }
+      },
+      "runtime": {
+        "pairs": 7,
+        "route_cpu_ms_per_frame": {
+          "baseline": 0.3515625,
+          "release": 0.3515625
+        },
+        "whole_cpu_ms_per_frame": {
+          "baseline": 0.3619791666666667,
+          "release": 0.3541666666666667
+        },
+        "disposition": "neutral/nonregressing under shared-load variation; no additional speedup claimed for release integration",
+        "released_tool_regeneration": "all4 generated files byte-identical"
+      }
+    },
+    "SonicBlastGG": {
+      "cases": 30,
+      "zero_fallback": true,
+      "equal_surfaces": 119,
+      "surface_count": 120,
+      "existing_exception": "03-1 moved: documented one-frame ring-icon upload difference;119/120 matches",
+      "canonical_state_PCM": "exact to qualified native checkpoint",
+      "PCM_sha256": "ff98a460412b7c009e267ed98cb6187265dcfb250c8ca58954a12544a47485e5",
+      "gpu16": {
+        "work_samples": 5999,
+        "frame_work_p95_ms": 0.72,
+        "frame_work_max_ms": 6.731,
+        "renderer": {
+          "upload_p95_ms": 0.024576,
+          "render_p95_ms": 0.08704,
+          "present_p95_ms": 0.01024,
+          "frames": 6000,
+          "effective_scale": 16,
+          "upload_bytes": 631137360,
+          "gpu_samples": 6000,
+          "gpu_p50_ms": 0.096256,
+          "gpu_p95_ms": 0.109568,
+          "gpu_max_ms": 0.252928,
+          "target_bytes": 23592960
+        }
+      },
+      "runtime": {
+        "pairs": 7,
+        "route_cpu_ms_per_frame": {
+          "baseline": 0.3984375,
+          "release": 0.390625
+        },
+        "whole_cpu_ms_per_frame": {
+          "baseline": 0.3828125,
+          "release": 0.3723958333333333
+        },
+        "disposition": "neutral/nonregressing under shared-load variation; no additional speedup claimed for release integration",
+        "released_tool_regeneration": "all4 generated files byte-identical"
+      }
+    }
+  },
+  "raw_root": "G:\\Temp\\Codex\\smsgg-host-20261101\\release-v0.0.4",
+  "raw_files": [
+    "qualification-results.json",
+    "runtime-confirmation.json",
+    "runtime-summary.json",
+    "coverage-sms/report.json",
+    "coverage-gg/report.json",
+    "coverage-route-test.log",
+    "bus-test.log",
+    "package-manifest.json"
+  ],
+  "portable_linux": "Shared CMake route/bank/ROM/fallback checks pass on Ubuntu; temporary fixture/build directory removed by existing test"
+}
