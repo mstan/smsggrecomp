@@ -135,6 +135,16 @@ From a game's companion repo checked out as a sibling of this engine:
 # overwrites generated/<prefix>_{full,dispatch,layout}.c, then rebuild the runner.
 ```
 
+## Packaging a game release
+
+`tools/package_game_release.ps1 -ProjectRoot <game repo>` builds
+`release/<Game>-windows-x64.zip` from the game's `build/` output: the exe,
+`SDL2.dll`, `Play.cmd` / `Play 16x.cmd`, `README.txt` (from the game's
+`packaging/README.txt.in`), and every license notice under `licenses/` (game,
+engine and z80-recomp-core `LICENSE` + `PERMISSIONS.md`, superzazu MIT, SDL2).
+It refuses to package if any notice is missing and never includes a ROM or
+generated C.
+
 ## ROMs
 
 ROMs are **never** committed (`.gitignore`d), and neither is the generated C
@@ -151,10 +161,34 @@ both are raw Z80 images with the `TMR SEGA` footer near the end of the first
 
 ## License
 
-Not yet declared. Code in this repo is original except where noted in
-**Acknowledgements** above: the vendored `runner/external/superzazu/z80.c` is
-MIT (see its own `LICENSE`). The clean-room SN76489 PSG is original to this
-project.
+PolyForm Noncommercial 1.0.0, with [additional permissions](PERMISSIONS.md)
+for voluntary donations and advertising revenue. See [`LICENSE`](LICENSE) for
+the standard license and [`PERMISSIONS.md`](PERMISSIONS.md) for the grant and
+its conditions. Payment must not buy access to the software, games built with
+it, or their updates, features, or game content, including early access.
+
+Copyright © 2026 Matthew Stanley. Matthew Stanley has authority from the relevant
+copyright holders to grant the additional permissions for smsggrecomp's project
+code, as stated in [`PERMISSIONS.md`](PERMISSIONS.md). Licensing inquiries go to
+him at <https://1379.tech>.
+
+By contributing, you license your contribution under the project's
+[PolyForm Noncommercial License 1.0.0](LICENSE), grant the
+[additional permissions in `PERMISSIONS.md`](PERMISSIONS.md) for the rights you
+control in your contribution, and authorize Matthew Stanley to grant those same
+additional permissions for it.
+
+Code in this repo is original except where noted in **Acknowledgements** above.
+Third-party components keep their own terms: the vendored
+`runner/external/superzazu/z80.c` is MIT (see
+[its `LICENSE`](runner/external/superzazu/LICENSE)). The clean-room SN76489 PSG
+is original to this project.
+
+ROMs and console BIOS images remain copyrighted by their respective owners and
+are not distributed; players supply them from their own collection. Generated C
+is a machine translation of the ROM and is never committed. Release executables
+contain statically recompiled builds of the original code, the same distribution
+model used by other static recompilation projects such as N64: Recompiled.
 
 ---
 
