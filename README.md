@@ -32,6 +32,24 @@ The [assisted coverage pass](COVERAGE.md) extends the original opening tests to
 fallback on those routes. It also fixes live-bank dispatch and in-flight
 fallback accounting, and centralizes game builds and ROM-bound QA controls.
 
+## Headless capture
+
+A game runner can record exactly what its window would show, with no window,
+audio device or desktop input:
+
+```text
+Game.exe rom.sms --internal-scale 16 --input-script in.txt     --capture-out frames --capture-size 1920x1080 --capture-from 600 --capture-to 3299     --capture-every 1 --capture-wav out.wav --exit-at-frame 3300
+```
+
+- `--capture-out DIR` writes `frame_%06u.png` for 0-based frames `--capture-from`..`--capture-to`
+  (every `--capture-every`). The GPU target (`--internal-scale`) or the cropped native
+  framebuffer is aspect-fitted onto the `--capture-size` canvas; omit it for native size.
+- `--capture-wav FILE` writes the mixed PSG output (`glue_audio_sample_rate()`, S16 stereo) for the
+  same frame range; no audio device is opened.
+- `--input-script FILE` takes `<frame> [P1:]BUTTONS` lines (`UP DOWN LEFT RIGHT A B C START`,
+  joined by `+`, `-` releases). `A` is button 1, `B`/`C` button 2; `START` is the console Pause.
+- The window is hidden and the run is unpaced. A one-line `[capture]` summary is printed on exit.
+
 ## Per-game runner repos
 
 smsggrecomp is the shared framework. Each game lives in its own companion repo

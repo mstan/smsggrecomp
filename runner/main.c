@@ -99,8 +99,14 @@ static void wav_close(void){
     fclose(g_wav); g_wav = NULL;
 }
 
+static uint64_t g_cap_wav_from, g_cap_wav_to = ~0ull;   /* capture mode: WAV spans frames [from,to] */
+static bool g_cap_wav_mode;
 static void audio_sink(const int16_t *frames, size_t n){
     g_audio_frames += n;
+    if (g_cap_wav_mode){   /* sink runs after the frame counter ticks: count-1 is the frame just ended */
+        uint64_t idx = glue_frame_count() - 1;
+        if (idx < g_cap_wav_from || idx > g_cap_wav_to) return;
+    }
     if (g_wav){
         fwrite(frames, 2*sizeof(int16_t), n, g_wav);
         g_wav_data_bytes += (uint32_t)(n * 2 * sizeof(int16_t));
@@ -148,6 +154,53 @@ static uint8_t press_provider(uint64_t frame){
     return m;   /* the latest directive at/under the current frame wins */
 }
 
+
+/* ---- frame-indexed input script (--input-script FILE) ----
+ * "<frame> [P1:]BUTTONS" per line ("-" = release all), BUTTONS joined by '+':
+ * UP DOWN LEFT RIGHT A B C START. Same format as nesrecomp --input; each line
+ * REPLACES player 1's held buttons from that frame. Lines for P2+ are ignored
+ * (SMS/GG runner models one pad). '#' starts a comment. */
+static struct { uint64_t frame; uint8_t mask; } *g_script; static int g_script_n, g_script_cap;
+static uint8_t script_name_mask(const char *t){
+    if(!strcmp(t,"UP"))return SMS_PAD_UP; if(!strcmp(t,"DOWN"))return SMS_PAD_DOWN;
+    if(!strcmp(t,"LEFT"))return SMS_PAD_LEFT; if(!strcmp(t,"RIGHT"))return SMS_PAD_RIGHT;
+    if(!strcmp(t,"A")||!strcmp(t,"B1"))return SMS_PAD_B1;
+    if(!strcmp(t,"B")||!strcmp(t,"C")||!strcmp(t,"B2"))return SMS_PAD_B2;
+    if(!strcmp(t,"START"))return SMS_PAD_START;
+    return 0;
+}
+static bool script_load(const char *path){
+    FILE *f=fopen(path,"r"); if(!f){fprintf(stderr,"[runner] cannot open input script %s\n",path);return false;}
+    char line[256]; int ln=0;
+    while(fgets(line,sizeof line,f)){
+        ln++; char *c=strchr(line,'#'); if(c)*c=0;
+        char *p=line; while(*p==' '||*p=='\t')p++;
+        if(!*p||*p=='\n'||*p=='\r')continue;
+        char *q; uint64_t fr=strtoull(p,&q,10); if(q==p){fprintf(stderr,"[runner] %s:%d: bad frame\n",path,ln);fclose(f);return false;}
+        while(*q==' '||*q=='\t')q++;
+        int player=1;
+        if((q[0]=='P'||q[0]=='p')&&q[1]>='1'&&q[1]<='9'&&q[2]==':'){player=q[1]-'0';q+=3;}
+        q[strcspn(q,"\r\n")]=0;
+        uint8_t m=0; char buf[160]; snprintf(buf,sizeof buf,"%s",q);
+        if(strcmp(buf,"-")&&*buf)for(char *t=strtok(buf,"+ ");t;t=strtok(NULL,"+ ")){
+            for(char *u=t;*u;u++)if(*u>='a'&&*u<='z')*u=(char)(*u-32);
+            uint8_t b=script_name_mask(t); if(!b){fprintf(stderr,"[runner] %s:%d: bad button %s\n",path,ln,t);fclose(f);return false;} m|=b;
+        }
+        if(player!=1)continue;
+        if(g_script_n==g_script_cap){g_script_cap=g_script_cap?g_script_cap*2:1024;g_script=realloc(g_script,(size_t)g_script_cap*sizeof *g_script);if(!g_script){fclose(f);return false;}}
+        g_script[g_script_n].frame=fr;g_script[g_script_n].mask=m;g_script_n++;
+    }
+    fclose(f);
+    fprintf(stderr,"[runner] input script: %d directive(s) from %s\n",g_script_n,path);
+    return true;
+}
+static uint8_t script_provider(uint64_t frame){
+    uint8_t m=0; uint64_t best=0; int found=0;
+    for(int i=0;i<g_script_n;i++)
+        if(g_script[i].frame<=frame&&(!found||g_script[i].frame>=best)){best=g_script[i].frame;m=g_script[i].mask;found=1;}
+    return m;
+}
+
 static int ci_cmp(const char *a, const char *b){
     for (; *a && *b; a++, b++){
         int ca=*a, cb=*b;
@@ -180,6 +233,10 @@ int main(int argc, char **argv){
     const char *gpu_report = NULL, *gpu_dump = NULL;
     int internal_scale=0; /* ordinary native SDL until internal resolution is requested */
     bool hidden=false;
+    /* Headless capture contract (see README "Headless capture"). */
+    const char *capture_out=NULL, *capture_wav=NULL, *input_script=NULL;
+    int capture_w=0, capture_h=0; uint64_t capture_from=0, capture_to=~0ull, capture_every=1, exit_at=0;
+    bool capture_mode=false;
     double start_cpu;
 #ifdef SMS_CYC_WATCH
     const char *cyc_watch_file = NULL; uint16_t cyc_watch_addr = 0;
@@ -217,6 +274,17 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--press")==0 && i+1<argc) press_add(argv[++i]);
         else if (strcmp(argv[i],"--route")==0 && i+1<argc) route=argv[++i];
         else if (strcmp(argv[i],"--report")==0 && i+1<argc) report=argv[++i];
+        else if (strcmp(argv[i],"--capture-out")==0 && i+1<argc){ capture_out=argv[++i]; capture_mode=true; }
+        else if (strcmp(argv[i],"--capture-size")==0 && i+1<argc){
+            if (sscanf(argv[++i],"%dx%d",&capture_w,&capture_h)!=2 || capture_w<16 || capture_h<16 || capture_w>16384 || capture_h>16384){
+                fprintf(stderr,"[runner] --capture-size requires WxH\n");return 2; }
+            capture_mode=true; }
+        else if (strcmp(argv[i],"--capture-from")==0 && i+1<argc) capture_from=strtoull(argv[++i],NULL,0);
+        else if (strcmp(argv[i],"--capture-to")==0 && i+1<argc) capture_to=strtoull(argv[++i],NULL,0);
+        else if (strcmp(argv[i],"--capture-every")==0 && i+1<argc){ capture_every=strtoull(argv[++i],NULL,0); if(!capture_every)capture_every=1; }
+        else if (strcmp(argv[i],"--capture-wav")==0 && i+1<argc){ capture_wav=argv[++i]; capture_mode=true; }
+        else if (strcmp(argv[i],"--exit-at-frame")==0 && i+1<argc){ exit_at=strtoull(argv[++i],NULL,0); }
+        else if (strcmp(argv[i],"--input-script")==0 && i+1<argc) input_script=argv[++i];
         else if (strcmp(argv[i],"--window")==0){
             want_window = true;
             if (i+1<argc && argv[i+1][0] != '-') win_scale = (int)strtol(argv[++i],NULL,0);
@@ -227,7 +295,7 @@ int main(int argc, char **argv){
     if (!rom){
         fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms] "
                        "[--window [scale]] [--audio-wav out.wav] [--mute] "
-                       "[--press FRAME:KEYS] [--route route.txt] [--report out.json] [--interp]\n", argv[0]);
+                       "[--press FRAME:KEYS] [--input-script FILE] [--capture-out DIR --capture-size WxH --capture-from N --capture-to M --capture-every K --capture-wav FILE --exit-at-frame N] [--route route.txt] [--report out.json] [--interp]\n", argv[0]);
         return 2;
     }
 
@@ -239,6 +307,23 @@ int main(int argc, char **argv){
     }
 #endif
 
+    if (capture_mode){
+        /* Hidden window, no audio device, unpaced, deterministic stepping. */
+        want_window = true; hidden = true; mute = true;
+        if (exit_at) { frames = exit_at; frames_set = true; }
+        else if (!frames_set && capture_to != ~0ull) { frames = capture_to + 1; frames_set = true; }
+        else if (!frames_set) { fprintf(stderr,"[runner] capture mode needs --exit-at-frame, --capture-to or --frames\n"); return 2; }
+        if (capture_wav) { audio_wav = capture_wav; g_cap_wav_mode = true; g_cap_wav_from = capture_from; g_cap_wav_to = capture_to; }
+        if (capture_out) {
+            char mk[700];
+#ifdef _WIN32
+            snprintf(mk, sizeof mk, "mkdir \"%s\" 2>nul", capture_out);
+#else
+            snprintf(mk, sizeof mk, "mkdir -p \"%s\" 2>/dev/null", capture_out);
+#endif
+            (void)system(mk);
+        }
+    }
     /* In windowed mode, default to run-until-closed unless --frames was given. */
     if (want_window && !frames_set) frames = 0;
 
@@ -270,7 +355,11 @@ int main(int argc, char **argv){
         fprintf(stderr,"[runner] cyc-watch anchor=0x%04X -> %s\n", cyc_watch_addr, cyc_watch_file);
     }
 #endif
-    if (g_press_n){
+    if (input_script){
+        if (!script_load(input_script)) return 2;
+        g_automated_input=true;
+        glue_set_input_cb(script_provider);
+    } else if (g_press_n){
         g_automated_input=true;
         glue_set_input_cb(press_provider);
         fprintf(stderr,"[runner] scripted input: %d directive(s)\n", g_press_n);
@@ -290,7 +379,8 @@ int main(int argc, char **argv){
                       is_gg ? "Sonic (GG) - recompiled" : "Sonic 1 (SMS) - recompiled")){
             glue_set_frame_callback(sdl_frame_cb);
             glue_set_native_output(!host_uses_gpu());
-            host_set_frame_cap(g_benchmark ? 0 : glue_frame_rate());
+            host_set_frame_cap((g_benchmark || capture_mode) ? 0 : glue_frame_rate());
+            if (capture_out) host_set_capture(capture_out, capture_w, capture_h, capture_from, capture_to, capture_every);
         } else
             fprintf(stderr,"[runner] SDL window init failed; running headless\n");
 #else
@@ -343,6 +433,15 @@ int main(int argc, char **argv){
     if (cyc_watch_file) glue_cyc_watch_close();
 #endif
 
+    if (capture_mode)
+        fprintf(stderr,"[capture] frames_written=%u present=%dx%d audio_samples=%llu wav=%s last_frame=%llu\n",
+#ifdef SMS_HAVE_SDL
+                (unsigned)host_capture_written(),
+#else
+                0u,
+#endif
+                capture_w, capture_h, (unsigned long long)g_audio_frames, capture_wav?capture_wav:"none",
+                (unsigned long long)glue_frame_count());
     fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
             (unsigned long long)glue_frame_count(), glue_dispatch_miss_count());
     bool ok=!coverage_route_failed();

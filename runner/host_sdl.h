@@ -18,6 +18,11 @@
 void host_set_internal_scale(int scale);
 void host_set_hidden(bool hidden);
 void host_report(FILE *out);
+/* Headless presented-frame capture: write frame_%06u.png of what the window shows
+ * (GPU target or cropped native fb, aspect-fitted onto a w x h canvas when
+ * w,h > 0) for 0-based frames from..to every `every`. */
+void host_set_capture(const char *dir, int w, int h, uint64_t from, uint64_t to, uint64_t every);
+uint32_t host_capture_written(void);
 bool host_dump_gpu(const char *path);
 bool host_uses_gpu(void);
 
