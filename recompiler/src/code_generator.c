@@ -931,7 +931,7 @@ static void write_layout(const char *path, const char *pfx, const GameConfig *cf
               "const GameSpec g_game_spec = {\n"
               " .display_name=\"%s\", .short_name=\"%s\",\n"
               " .expected_rom_crc32=0x%08Xu, .expected_rom_size=%uu,\n"
-              " .platform=%s\n};\n#endif\n",pfx,pfx,rom->crc32,(unsigned)rom->size,
+              " .platform=%s\n};\n#endif\n",cfg->display_name[0]?cfg->display_name:pfx,pfx,rom->crc32,(unsigned)rom->size,
               cfg->platform==SMS_PLATFORM_GG?"GAME_PLATFORM_GG":"GAME_PLATFORM_SMS");
     fclose(l);
 }

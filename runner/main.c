@@ -10,6 +10,7 @@
  * (DEBUG.md) layer on top of this core later.
  */
 #include "glue.h"
+#include "services.h"
 #include "coverage_route.h"
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
@@ -21,6 +22,13 @@
 #include <stdbool.h>
 #include <stdlib.h>
 static bool g_automated_input;
+static uint64_t g_route_release;
+static bool g_service_window,g_use_route;
+static int runtime_boundary(uint64_t frame){
+    if(g_use_route&&coverage_route_frame(frame))return 1;
+    if(!g_service_window){sms_services_pad(glue_get_pad1());return sms_services_frame();}
+    return 0;
+}
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -54,9 +62,12 @@ static int benchmark_frame(const uint32_t *fb, int w, int h){
  * request shutdown (glue.c then unwinds the run loop). */
 static int sdl_frame_cb(const uint32_t *fb, int w, int h){
     if(g_benchmark)benchmark_frame(fb,w,h);
+    if(!g_benchmark)host_set_prepare_pacing(sms_services_fast_prepare());
     bool keep = host_present(fb, w, h);
-    if (!g_automated_input) glue_set_pad1(host_get_pad1());
-    return keep ? 0 : 1;
+    if(g_route_release&&glue_frame_count()>=g_route_release){g_automated_input=false;g_route_release=0;}
+    if (!g_automated_input&&!sms_services_input_override()) {glue_set_pad1(host_get_pad1());sms_services_pad(host_get_pad1());}
+    else sms_services_pad(glue_get_pad1());
+    return keep&&!sms_services_frame() ? 0 : 1;
 }
 #endif
 
@@ -112,7 +123,7 @@ static void audio_sink(const int16_t *frames, size_t n){
         g_wav_data_bytes += (uint32_t)(n * 2 * sizeof(int16_t));
     }
 #ifdef SMS_HAVE_SDL
-    if (g_audio_live) host_audio_submit(frames, n);
+    if (g_audio_live&&!sms_services_fast_prepare()) host_audio_submit(frames, n);
 #endif
 }
 
@@ -216,6 +227,11 @@ static bool ends_with(const char *s, const char *suf){
 }
 
 int main(int argc, char **argv){
+    sms_settings_load();
+    int launcher_mode=argc==1?1:0;
+    char picked_rom[1024];
+    unsigned debug_port=65536;uint64_t pause_at=0;bool show_at_ready=false;const char *status_path=NULL;
+    bool launcher_used=false;
     const char *rom = NULL;
     uint64_t frames = 600;
     int force_gg = -1;
@@ -245,6 +261,12 @@ int main(int argc, char **argv){
     bool frames_set = false;
     for (int i=1;i<argc;i++){
         if (strcmp(argv[i],"--frames")==0 && i+1<argc){ frames = strtoull(argv[++i],NULL,0); frames_set = true; }
+        else if (strcmp(argv[i],"--launcher")==0) launcher_mode=1;
+        else if (strcmp(argv[i],"--no-launcher")==0) launcher_mode=-1;
+        else if (strcmp(argv[i],"--debug-port")==0&&i+1<argc){char *end;unsigned long value=strtoul(argv[++i],&end,10);if(*end||value>65535)return 2;debug_port=(unsigned)value;}
+        else if (strcmp(argv[i],"--pause-at")==0&&i+1<argc) pause_at=strtoull(argv[++i],NULL,10);
+        else if (strcmp(argv[i],"--show-at-ready")==0) show_at_ready=true;
+        else if (strcmp(argv[i],"--status-file")==0&&i+1<argc) status_path=argv[++i];
         else if (strcmp(argv[i],"--gg")==0) force_gg = 1;
         else if (strcmp(argv[i],"--sms")==0) force_gg = 0;
         else if (strcmp(argv[i],"--dump-frame")==0 && i+1<argc) dump_frame = strtoull(argv[++i],NULL,0);
@@ -292,6 +314,12 @@ int main(int argc, char **argv){
         else if (argv[i][0] != '-') rom = argv[i];
         else {fprintf(stderr,"[runner] unknown or incomplete arg: %s\n", argv[i]);return 2;}
     }
+    if(interp){fprintf(stderr,"This host-native build requires generated coverage; interpreter play is unavailable.\n");return 2;}
+    if(launcher_mode>=0&&(launcher_mode==1||(want_window&&!hidden&&!capture_mode&&!route&&!g_press_n&&!input_script))){
+        int result=sms_launcher(rom,picked_rom,sizeof picked_rom);
+        if(result!=0)return result==1?0:1;
+        rom=picked_rom;want_window=true;win_scale=sms_settings_window_scale();launcher_used=true;
+    }
     if (!rom){
         fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms] "
                        "[--window [scale]] [--audio-wav out.wav] [--mute] "
@@ -326,14 +354,15 @@ int main(int argc, char **argv){
     }
     /* In windowed mode, default to run-until-closed unless --frames was given. */
     if (want_window && !frames_set) frames = 0;
+    if(show_at_ready&&pause_at)hidden=true;
 
     fprintf(stderr,"[runner] SMS/GG recompiled runner (%s)\n",
             want_window ? "windowed" : "headless");
     if (!glue_load_rom(rom)) return 1;
     if (route){
         if (g_press_n || !coverage_route_load(route,glue_rom_crc32())) return 2;
-        if (frames_set && coverage_route_last_frame()>frames){coverage_route_close();return 2;}
-        if (!frames_set)frames=coverage_route_last_frame()+1;
+        if (frames_set && frames && coverage_route_last_frame()>frames){coverage_route_close();return 2;}
+        if (!frames_set&&!want_window)frames=coverage_route_last_frame()+1;
     }
     fprintf(stderr,"[runner] loaded %s (%llu bytes), platform=%s, running %s\n",
             rom, (unsigned long long)glue_rom_size(), is_gg?"GG":"SMS",
@@ -341,10 +370,11 @@ int main(int argc, char **argv){
 
     glue_init(is_gg, frames);
     if (route){
-        g_automated_input=true;
-        glue_set_boundary_callback(coverage_route_frame);
+        g_automated_input=true;g_route_release=coverage_route_last_frame();
+        g_use_route=true;
         if (coverage_route_frame(0)){coverage_route_close();return 1;}
     }
+    glue_set_boundary_callback(runtime_boundary);
     if (g_benchmark) glue_set_frame_callback(benchmark_frame);
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
@@ -371,18 +401,20 @@ int main(int argc, char **argv){
         /* SMS shows the full 256x192; GG shows a 160x144 centred crop. */
         host_set_internal_scale(internal_scale);
         host_set_hidden(hidden);
+        host_set_fullscreen(launcher_used?sms_settings_fullscreen():0);
         int cx = is_gg ? (SMS_SCREEN_W-GG_SCREEN_W)/2 : 0;
         int cy = is_gg ? (SMS_SCREEN_H-GG_SCREEN_H)/2 : 0;
         int cw = is_gg ? GG_SCREEN_W : SMS_SCREEN_W;
         int ch = is_gg ? GG_SCREEN_H : SMS_SCREEN_H;
         if (host_init(SMS_SCREEN_W, SMS_SCREEN_H, cx, cy, cw, ch, win_scale,
-                      is_gg ? "Sonic (GG) - recompiled" : "Sonic 1 (SMS) - recompiled")){
+                      g_game_spec.display_name)){
+            g_service_window=true;
             glue_set_frame_callback(sdl_frame_cb);
             glue_set_native_output(!host_uses_gpu());
-            host_set_frame_cap((g_benchmark || capture_mode) ? 0 : glue_frame_rate());
+            host_set_frame_cap((g_benchmark || capture_mode || pause_at) ? 0 : glue_frame_rate());
             if (capture_out) host_set_capture(capture_out, capture_w, capture_h, capture_from, capture_to, capture_every);
         } else
-            fprintf(stderr,"[runner] SDL window init failed; running headless\n");
+            {fprintf(stderr,"[runner] SDL window init failed\n");return 1;}
 #else
         fprintf(stderr,"[runner] --window requested but built without SDL "
                        "(-DSMS_HAVE_SDL); running headless\n");
@@ -392,7 +424,7 @@ int main(int argc, char **argv){
     /* Audio outputs (independent; either/both may be active). */
     bool audio_on = false;
 #ifdef SMS_HAVE_SDL
-    if (want_window && !mute){
+    if (want_window && !mute && sms_settings_audio_enabled()){
         if (host_audio_init(glue_audio_sample_rate())){ g_audio_live = true; audio_on = true; }
     }
 #else
@@ -403,6 +435,7 @@ int main(int argc, char **argv){
     }
     if (audio_on || g_benchmark) glue_set_audio_sink(audio_sink);
 
+    if(!sms_services_init(rom,debug_port,pause_at,show_at_ready,want_window,status_path))return 1;
     start_cpu = cpu_seconds();
     if (interp){
         fprintf(stderr,"[runner] ORACLE reference mode (superzazu interpreter)\n");
@@ -444,7 +477,8 @@ int main(int argc, char **argv){
                 (unsigned long long)glue_frame_count());
     fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
             (unsigned long long)glue_frame_count(), glue_dispatch_miss_count());
-    bool ok=!coverage_route_failed();
+    bool services_ok=sms_services_close();
+    bool ok=services_ok&&!coverage_route_failed()&&glue_dispatch_miss_count()==0;
     if (report && !glue_write_report(report))ok=false;
     coverage_route_close();
     return ok?0:1;

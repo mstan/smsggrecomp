@@ -93,8 +93,8 @@ consumed by Sega Genesis Recomp's sound-CPU backend.
 **The rest of the machine is not recompiled** — VDP rendering, the SN76489
 PSG, controller/system ports, and the Sega/Codemasters mapper all run in the
 runner. Same model as the sibling projects: recompile the CPU, emulate the
-silicon. Computed jumps the static analysis can't resolve fall back to the
-vendored superzazu Z80 interpreter over the live bus (the "hybrid" path).
+silicon. Computed jumps outside generated coverage stop with an explicit native
+coverage error. Production play never enters an interpreter fallback.
 
 Key pieces:
 - **`z80_decoder.c`** — full Z80 ISA decode incl. the `CB`/`ED`/`DD`/`FD`/
@@ -115,7 +115,7 @@ Key pieces:
 | Directory | Purpose |
 |-----------|---------|
 | `recompiler/src/` | The recompiler tool — analyzes the ROM, emits native C. Builds `SmsRecomp.exe`. |
-| `runner/` | Shared clean-room runtime: Z80 interpreter (hybrid fallback), VDP, SN76489 PSG, I/O, mapper, SDL2 host, glue. |
+| `runner/` | Shared native runtime: VDP, PSG adapter, I/O, mapper, SDL2 host and shared-service adapters. |
 | `external/z80-recomp-core/` | Shared `Z80State`, generated host ABI, and verified instruction semantics. |
 | `runner/include/` | Compatibility forwarding headers for existing generated SMS/GG source. |
 | `runner/external/superzazu/` | Vendored MIT Z80 core — interpreter + codegen reference. |

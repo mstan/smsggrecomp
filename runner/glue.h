@@ -69,6 +69,8 @@ enum {
  * SDL host refreshes these from the keyboard each frame; headless runs leave
  * them 0, so the ports read idle. */
 void     glue_set_pad1(uint8_t pressed);
+uint8_t  glue_get_pad1(void);
+uint64_t glue_nmi_count(void);
 void     glue_set_pad2(uint8_t pressed);
 
 /* Headless scripted input: when set, the runner calls this once per completed
@@ -102,4 +104,7 @@ bool glue_write_report(const char *path);
 /* Native viewport PNG plus WRAM/VRAM/CRAM/register planes and execution JSON. */
 bool glue_capture(const char *prefix);
 
+bool glue_mod_read(const char *,uint64_t,uint8_t *,size_t);
+bool glue_mod_write(const char *,uint64_t,const uint8_t *,size_t);
+const uint8_t *glue_original_image(size_t *);
 #endif /* GLUE_H */

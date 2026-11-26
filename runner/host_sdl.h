@@ -17,6 +17,7 @@
 /* 0 keeps ordinary native SDL; 1..16 explicitly request the GPU job path. */
 void host_set_internal_scale(int scale);
 void host_set_hidden(bool hidden);
+void host_set_fullscreen(int fullscreen);
 void host_report(FILE *out);
 /* Headless presented-frame capture: write frame_%06u.png of what the window shows
  * (GPU target or cropped native fb, aspect-fitted onto a w x h canvas when
@@ -43,6 +44,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h);
  * to disable (uncapped). Without this the loop would run as fast as the display
  * refreshes (e.g. 2x on a 120 Hz monitor). */
 void host_set_frame_cap(double fps);
+void host_set_prepare_pacing(bool fast);
 
 void host_shutdown(void);
 
@@ -63,4 +65,8 @@ void host_audio_shutdown(void);
  * glue_set_pad1() each frame, keeping the host free of glue calls. */
 uint8_t host_get_pad1(void);
 
+bool host_poll(void);
+void host_show(void);
+void host_audio_pause(bool);
+const char *host_controller_label(void);
 #endif /* HOST_SDL_H */

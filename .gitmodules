@@ -1,3 +1,27 @@
 [submodule "external/z80-recomp-core"]
 	path = external/z80-recomp-core
-	url = ../z80-recomp-core.git
+	url = https://github.com/mstan/z80-recomp-core.git
+[submodule "external/recomp-mod-core"]
+	path = external/recomp-mod-core
+	url = https://github.com/mstan/recomp-mod-core.git
+[submodule "external/recomp-audio-core"]
+	path = external/recomp-audio-core
+	url = https://github.com/mstan/recomp-audio-core.git
+[submodule "external/recomp-presentation-core"]
+	path = external/recomp-presentation-core
+	url = https://github.com/mstan/recomp-presentation-core.git
+[submodule "external/recomp-persistence-core"]
+	path = external/recomp-persistence-core
+	url = https://github.com/mstan/recomp-persistence-core-candidate-20261124.git
+[submodule "external/recomp-input-core"]
+	path = external/recomp-input-core
+	url = https://github.com/mstan/recomp-input-core-candidate-20261124.git
+[submodule "external/recomp-diagnostics-core"]
+	path = external/recomp-diagnostics-core
+	url = https://github.com/mstan/recomp-diagnostics-core-candidate-20261124.git
+[submodule "external/sega-psg-core"]
+	path = external/sega-psg-core
+	url = https://github.com/mstan/sega-psg-core.git
+[submodule "external/recomp-ui"]
+	path = external/recomp-ui
+	url = https://github.com/mstan/recomp-ui.git
