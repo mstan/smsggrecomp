@@ -107,4 +107,13 @@ bool glue_capture(const char *prefix);
 bool glue_mod_read(const char *,uint64_t,uint8_t *,size_t);
 bool glue_mod_write(const char *,uint64_t,const uint8_t *,size_t);
 const uint8_t *glue_original_image(size_t *);
+/* Statically trusted native callbacks only. Registration is before execution;
+ * apply/finish run inside the owner-thread mod transaction. finish(false)
+ * restores every private effect, including a failed apply. */
+typedef int (*SmsModHookApply)(void *);
+typedef void (*SmsModHookFinish)(void *,int committed);
+bool glue_register_mod_hook(const char *,SmsModHookApply,SmsModHookFinish,void *);
+int glue_mod_begin(void);
+int glue_mod_hook(const char *);
+void glue_mod_finish(int committed);
 #endif /* GLUE_H */

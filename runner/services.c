@@ -2,6 +2,7 @@
 #include "services.h"
 #include "glue.h"
 #include "game_spec.h"
+#include "content_mods.h"
 #include "recomp_mod.h"
 #include "diagnostics_server.h"
 #include "recomp_diagnostics/replay_c.h"
@@ -53,10 +54,11 @@ static void pause_runtime(bool value){paused=value;
 #endif
  save_status();
 }
-static int begin(void *unused){(void)unused;return 1;}
+static int begin(void *unused){(void)unused;return glue_mod_begin();}
+static int hook(void *unused,const char *id){(void)unused;return glue_mod_hook(id);}
 static int read_bytes(void *unused,const char *space,uint64_t at,uint8_t *out,size_t n){(void)unused;return glue_mod_read(space,at,out,n);}
 static int write_bytes(void *unused,const char *space,uint64_t at,const uint8_t *data,size_t n){(void)unused;return glue_mod_write(space,at,data,n);}
-static void finish(void *unused,int committed){(void)unused;(void)committed;}
+static void finish(void *unused,int committed){(void)unused;glue_mod_finish(committed);}
 static void command(void *unused,DiagServer *s,const char *line){
  (void)unused;(void)s;
  if(!strcmp(line,"status")){char text[2048];status(text,sizeof text);reply(text);}
@@ -83,7 +85,7 @@ static void command(void *unused,DiagServer *s,const char *line){
   if(sscanf(line+6,"%31s %llx %512s %512s %1s",space,&at,expected,replacement,extra)!=4||(a=bytes(expected,old,sizeof old))<0||(b=bytes(replacement,data,sizeof data))!=a)reply("{\"ok\":false,\"error\":\"patch space offset expected_hex replacement_hex\"}");
   else{
    rmod_patch patch={space,(uint64_t)at,old,data,(size_t)a};
-   rmod_engine engine={NULL,g_game_spec.short_name,original_sha,begin,read_bytes,write_bytes,NULL,finish};
+   rmod_engine engine={NULL,g_game_spec.short_name,original_sha,begin,read_bytes,write_bytes,hook,finish};
    int result=rmod_apply(mods,&patch,1,NULL,0,&engine,identity);
    if(result==1){hex(identity,32,plan_sha);save_status();reply("{\"ok\":true}");}
    else{if(result<0){failed=true;quitting=true;}reply("{\"ok\":false,\"error\":\"guard, conflict, identity or transaction rejected\"}");}
@@ -94,6 +96,13 @@ static void command(void *unused,DiagServer *s,const char *line){
   if(sscanf(line+5,"%31s %llx %u %1s",space,&at,&n,extra)!=3||!n||n>256||!glue_mod_read(space,at,data,n))reply("{\"ok\":false}");
   else{char encoded[513];hex(data,n,encoded);snprintf(text,sizeof text,"{\"ok\":true,\"hex\":\"%s\"}",encoded);reply(text);}
  }
+ else if(!strncmp(line,"hook ",5)){
+  char first[64],second[64],extra[2];int count=sscanf(line+5,"%63s %63s %1s",first,second,extra);
+  if(count<1||count>2)reply("{\"ok\":false}");else{
+   rmod_hook hooks[2]={{first},{second}};uint8_t identity[32];rmod_engine engine={NULL,g_game_spec.short_name,original_sha,begin,read_bytes,write_bytes,hook,finish};
+   int result=rmod_apply(mods,NULL,0,hooks,(size_t)count,&engine,identity);if(result==1){hex(identity,32,plan_sha);reply("{\"ok\":true}");}else reply("{\"ok\":false,\"error\":\"unknown, conflicting or rolled-back hook\"}");
+  }
+ }
  else reply("{\"ok\":false,\"error\":\"unknown command\"}");
 }
 int sms_services_init(const char *rom,unsigned port,uint64_t stop,bool show,bool window,const char *path){
@@ -102,6 +111,10 @@ int sms_services_init(const char *rom,unsigned port,uint64_t stop,bool show,bool
  if(!rmod_sha256_bytes(image,size,sha)||!rmod_sha256_bytes("smsgg-runtime-plan-v1",21,plan))return 0;
  hex(sha,32,original_sha);hex(plan,32,plan_sha);mods=rmod_create();
  if(!mods||!rmod_bind_plan(mods,g_game_spec.short_name,original_sha,plan_sha))return 0;
+ if(!sms_content_prepare(rom)){fprintf(stderr,"[mods] %s\n",sms_content_error());return 0;}
+ rmod_engine engine={NULL,g_game_spec.short_name,original_sha,begin,read_bytes,write_bytes,hook,finish};
+ int content=sms_content_apply(mods,&engine,plan);if(content!=1){fprintf(stderr,"[mods] %s\n",sms_content_error());return 0;}
+ if(sms_content_count())hex(plan,32,plan_sha);
  if(port<=65535){server=diag_server_create((uint16_t)port);if(!server||!diag_server_raw_handler(server,command,NULL))return 0;fprintf(stderr,"[diagnostics] loopback TCP %u\n",diag_server_port(server));}
  writer=recomp_replay_create_profile(RECOMP_REPLAY_HASHED64,2*1024*1024);
  char header[512];snprintf(header,sizeof header,"# SMSGG_INPUT_V1 platform=%s original_sha256=%s\n",g_game_spec.platform==GAME_PLATFORM_GG?"gg":"sms",original_sha);

@@ -136,6 +136,22 @@ static void    (*g_audio_sink)(const int16_t *stereo_frames, size_t frame_count)
 static uint8_t   g_pad1, g_pad2;
 static bool      g_pause_held,g_nmi_pending;
 static uint64_t  g_nmi_count;
+static uint64_t  g_mod_pulse_release;
+typedef struct {char id[64];SmsModHookApply apply;SmsModHookFinish finish;void *user;} ModHook;
+static ModHook g_mod_hooks[32];
+static unsigned g_mod_hook_count,g_mod_applied[32],g_mod_applied_count;
+static bool g_mod_transaction;
+static struct {uint8_t pad;bool held,pending;uint64_t deadline,release;} g_console_before;
+static int console_hook_apply(void *unused){
+    (void)unused;g_console_before.pad=g_pad1;g_console_before.held=g_pause_held;g_console_before.pending=g_nmi_pending;
+    g_console_before.deadline=g_sync_deadline;g_console_before.release=g_mod_pulse_release;
+    glue_set_pad1((uint8_t)(g_pad1|SMS_PAD_START));g_mod_pulse_release=g_frame+1;return 1;
+}
+static void console_hook_finish(void *unused,int committed){
+    (void)unused;if(committed)return;
+    g_pad1=g_console_before.pad;g_pause_held=g_console_before.held;g_nmi_pending=g_console_before.pending;
+    g_sync_deadline=g_console_before.deadline;g_mod_pulse_release=g_console_before.release;
+}
 static uint8_t (*g_input_cb)(uint64_t frame);   /* headless scripted input */
 
 /* ---- per-frame VDP-state trace (oracle: query, don't probe) ----
@@ -476,6 +492,7 @@ void sms_io_out(uint8_t p, uint8_t v){
 /* ====================== timing + interrupts ====================== */
 static void frame_completed(void){
     g_frame++;
+    if(g_mod_pulse_release&&g_frame>=g_mod_pulse_release){g_mod_pulse_release=0;glue_set_pad1((uint8_t)(g_pad1&~SMS_PAD_START));}
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
     if (g_input_cb) glue_set_pad1(g_input_cb(g_frame));
@@ -1229,6 +1246,11 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     g_psg_cyc = 0;
     g_pad1 = g_pad2 = 0;                  /* controllers idle */
     g_pause_held=g_nmi_pending=false;g_nmi_count=0;
+    g_mod_pulse_release=0;g_mod_transaction=false;g_mod_hook_count=g_mod_applied_count=0;
+    glue_register_mod_hook("console.start-pause",console_hook_apply,console_hook_finish,NULL);
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    if(g_game_spec.on_post_reset)g_game_spec.on_post_reset();
+#endif
     g_hybrid_cyc = g_hybrid_calls = 0;
     glue_diff_init();                    /* differential harness (env-gated, no-op unless SMS_DIFF_ADDR) */
     vdp_enable_raster(g_frame_cb || g_dump_path);
@@ -1346,18 +1368,35 @@ void glue_set_boundary_callback(int (*cb)(uint64_t)){ g_boundary_cb = cb; }
 bool glue_mod_read(const char *space,uint64_t address,uint8_t *out,size_t size){
  uint8_t *p=NULL;size_t bound=0;
  if(!strcmp(space,"ram")){p=g_ram;bound=sizeof g_ram;}
- else if(!strcmp(space,"cartridge")||!strcmp(space,"rom")){p=g_rom;bound=g_rom_size;}
+ else if(!strcmp(space,"cartridge")){p=g_rom;bound=g_rom_size;}
  if(!p||address>bound||size>bound-(size_t)address)return false;
  memcpy(out,p+(size_t)address,size);return true;
 }
 bool glue_mod_write(const char *space,uint64_t address,const uint8_t *data,size_t size){
  uint8_t *p=NULL;size_t bound=0;
  if(!strcmp(space,"ram")){p=g_ram;bound=sizeof g_ram;}
- else if(!strcmp(space,"cartridge")||!strcmp(space,"rom")){p=g_rom;bound=g_rom_size;}
+ else if(!strcmp(space,"cartridge")){p=g_rom;bound=g_rom_size;}
  if(!p||address>bound||size>bound-(size_t)address)return false;
  memcpy(p+(size_t)address,data,size);return true;
 }
 const uint8_t *glue_original_image(size_t *size){*size=g_rom_size;return g_rom;}
+bool glue_register_mod_hook(const char *id,SmsModHookApply apply,SmsModHookFinish finish,void *user){
+ if(!id||!*id||strlen(id)>=64||!apply||!finish||g_mod_transaction||g_mod_hook_count>=32)return false;
+ for(unsigned i=0;i<g_mod_hook_count;i++)if(!strcmp(id,g_mod_hooks[i].id))return false;
+ ModHook *hook=&g_mod_hooks[g_mod_hook_count++];snprintf(hook->id,sizeof hook->id,"%s",id);hook->apply=apply;hook->finish=finish;hook->user=user;return true;
+}
+int glue_mod_begin(void){if(g_mod_transaction)return 0;g_mod_transaction=true;g_mod_applied_count=0;return 1;}
+int glue_mod_hook(const char *id){
+ if(!g_mod_transaction||!id)return 0;
+ for(unsigned i=0;i<g_mod_hook_count;i++)if(!strcmp(id,g_mod_hooks[i].id)){
+  if(g_mod_applied_count>=32)return 0;g_mod_applied[g_mod_applied_count++]=i;
+  return g_mod_hooks[i].apply(g_mod_hooks[i].user);
+ }return 0;
+}
+void glue_mod_finish(int committed){
+ while(g_mod_applied_count){ModHook *hook=&g_mod_hooks[g_mod_applied[--g_mod_applied_count]];hook->finish(hook->user,committed);}
+ g_mod_transaction=false;
+}
 
 
 bool glue_write_report(const char *path){

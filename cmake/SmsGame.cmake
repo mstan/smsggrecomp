@@ -67,11 +67,13 @@ function(sms_add_game TARGET)
         add_library(smsgg_runtime STATIC
             "${_engine}/runner/main.c" "${_engine}/runner/glue.c"
             "${_engine}/runner/services.c" "${_engine}/runner/launcher.c"
+            "${_engine}/runner/content_mods.cpp" "${_engine}/recompiler/src/toml.c"
             "${_engine}/runner/coverage_route.c" "${_engine}/runner/video/sms_vdp.c"
             "${_engine}/runner/audio/sn76489.c" "${_engine}/runner/external/superzazu/z80.c")
         target_compile_features(smsgg_runtime PUBLIC c_std_11)
         target_compile_definitions(smsgg_runtime PRIVATE SMSGG_HAVE_GAME_LAYOUT SMS_NATIVE_HOOKS SMS_NATIVE_DISPATCH SMS_NATIVE_EVENTS SMS_NATIVE_SPANS)
         target_include_directories(smsgg_runtime PUBLIC "${_engine}/runner" "${_engine}/runner/include"
+            "${_engine}/recompiler/src"
             "${_engine}/external/recomp-presentation-core/include")
         target_link_libraries(smsgg_runtime PUBLIC sega-psg::core recomp-mod-core::core recomp-audio::core recomp-input::core recomp-diagnostics-core::core recomp-persistence-core::core)
         target_compile_options(smsgg_runtime PRIVATE "$<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-${SMSGG_OPTIMIZATION}>")
@@ -89,6 +91,7 @@ function(sms_add_game TARGET)
     add_executable(${TARGET} ${_sources})
     target_link_libraries(${TARGET} PRIVATE smsgg_runtime)
     if(SMSGG_ENABLE_SDL)
+        _recomp_ui_utf8_manifest(${TARGET})
         recomp_stage_launcher_assets(${TARGET} CONSOLE smsgg)
         if(WIN32)
             add_custom_command(TARGET ${TARGET} POST_BUILD
