@@ -32,6 +32,24 @@ The [assisted coverage pass](COVERAGE.md) extends the original opening tests to
 fallback on those routes. It also fixes live-bank dispatch and in-flight
 fallback accounting, and centralizes game builds and ROM-bound QA controls.
 
+## Headless capture
+
+A game runner can record exactly what its window would show, with no window,
+audio device or desktop input:
+
+```text
+Game.exe rom.sms --internal-scale 16 --input-script in.txt     --capture-out frames --capture-size 1920x1080 --capture-from 600 --capture-to 3299     --capture-every 1 --capture-wav out.wav --exit-at-frame 3300
+```
+
+- `--capture-out DIR` writes `frame_%06u.png` for 0-based frames `--capture-from`..`--capture-to`
+  (every `--capture-every`). The GPU target (`--internal-scale`) or the cropped native
+  framebuffer is aspect-fitted onto the `--capture-size` canvas; omit it for native size.
+- `--capture-wav FILE` writes the mixed PSG output (`glue_audio_sample_rate()`, S16 stereo) for the
+  same frame range; no audio device is opened.
+- `--input-script FILE` takes `<frame> [P1:]BUTTONS` lines (`UP DOWN LEFT RIGHT A B C START`,
+  joined by `+`, `-` releases). `A` is button 1, `B`/`C` button 2; `START` is the console Pause.
+- The window is hidden and the run is unpaced. A one-line `[capture]` summary is printed on exit.
+
 ## Per-game runner repos
 
 smsggrecomp is the shared framework. Each game lives in its own companion repo
@@ -75,8 +93,8 @@ consumed by Sega Genesis Recomp's sound-CPU backend.
 **The rest of the machine is not recompiled** — VDP rendering, the SN76489
 PSG, controller/system ports, and the Sega/Codemasters mapper all run in the
 runner. Same model as the sibling projects: recompile the CPU, emulate the
-silicon. Computed jumps the static analysis can't resolve fall back to the
-vendored superzazu Z80 interpreter over the live bus (the "hybrid" path).
+silicon. Computed jumps outside generated coverage stop with an explicit native
+coverage error. Production play never enters an interpreter fallback.
 
 Key pieces:
 - **`z80_decoder.c`** — full Z80 ISA decode incl. the `CB`/`ED`/`DD`/`FD`/
@@ -97,7 +115,7 @@ Key pieces:
 | Directory | Purpose |
 |-----------|---------|
 | `recompiler/src/` | The recompiler tool — analyzes the ROM, emits native C. Builds `SmsRecomp.exe`. |
-| `runner/` | Shared clean-room runtime: Z80 interpreter (hybrid fallback), VDP, SN76489 PSG, I/O, mapper, SDL2 host, glue. |
+| `runner/` | Shared native runtime: VDP, PSG adapter, I/O, mapper, SDL2 host and shared-service adapters. |
 | `external/z80-recomp-core/` | Shared `Z80State`, generated host ABI, and verified instruction semantics. |
 | `runner/include/` | Compatibility forwarding headers for existing generated SMS/GG source. |
 | `runner/external/superzazu/` | Vendored MIT Z80 core — interpreter + codegen reference. |

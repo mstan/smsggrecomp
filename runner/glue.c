@@ -134,6 +134,24 @@ static void    (*g_audio_sink)(const int16_t *stereo_frames, size_t frame_count)
  * by the host each frame; read (active-low) by sms_io_in. Both run paths read
  * through the same sms_io_in, so input reaches recomp and hybrid/interp alike. */
 static uint8_t   g_pad1, g_pad2;
+static bool      g_pause_held,g_nmi_pending;
+static uint64_t  g_nmi_count;
+static uint64_t  g_mod_pulse_release;
+typedef struct {char id[64];SmsModHookApply apply;SmsModHookFinish finish;void *user;} ModHook;
+static ModHook g_mod_hooks[32];
+static unsigned g_mod_hook_count,g_mod_applied[32],g_mod_applied_count;
+static bool g_mod_transaction;
+static struct {uint8_t pad;bool held,pending;uint64_t deadline,release;} g_console_before;
+static int console_hook_apply(void *unused){
+    (void)unused;g_console_before.pad=g_pad1;g_console_before.held=g_pause_held;g_console_before.pending=g_nmi_pending;
+    g_console_before.deadline=g_sync_deadline;g_console_before.release=g_mod_pulse_release;
+    glue_set_pad1((uint8_t)(g_pad1|SMS_PAD_START));g_mod_pulse_release=g_frame+1;return 1;
+}
+static void console_hook_finish(void *unused,int committed){
+    (void)unused;if(committed)return;
+    g_pad1=g_console_before.pad;g_pause_held=g_console_before.held;g_nmi_pending=g_console_before.pending;
+    g_sync_deadline=g_console_before.deadline;g_mod_pulse_release=g_console_before.release;
+}
 static uint8_t (*g_input_cb)(uint64_t frame);   /* headless scripted input */
 
 /* ---- per-frame VDP-state trace (oracle: query, don't probe) ----
@@ -474,9 +492,10 @@ void sms_io_out(uint8_t p, uint8_t v){
 /* ====================== timing + interrupts ====================== */
 static void frame_completed(void){
     g_frame++;
+    if(g_mod_pulse_release&&g_frame>=g_mod_pulse_release){g_mod_pulse_release=0;glue_set_pad1((uint8_t)(g_pad1&~SMS_PAD_START));}
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
-    if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
+    if (g_input_cb) glue_set_pad1(g_input_cb(g_frame));
     if (g_boundary_cb && g_boundary_cb(g_frame) && g_running)
         longjmp(g_quit_env, 1);
     if (g_audio_sink){
@@ -652,6 +671,16 @@ static void frame_completed(void){
         longjmp(g_quit_env, 1);
 }
 
+static void take_nmi(void){
+    /* SMS console Pause is an edge-triggered NMI. Use the already generated
+     * vector and ordinary guest stack/return path, with the existing Z80
+     * contract: 11 T-states, one refresh increment, IFF1 clear/IFF2 retained. */
+    g_nmi_count++;
+    g_z80.cyc+=11;g_z80.iff1=false;g_z80.halted=false;
+    g_z80.r=(uint8_t)((g_z80.r&0x80)|((g_z80.r+1)&0x7f));
+    g_z80.sp=(uint16_t)(g_z80.sp-2);sms_write16(g_z80.sp,g_dbg_pc);
+    call_by_address(0x0066);
+}
 static void take_irq(void){
 #ifdef SMS_TRACE_PC
     g_dbg_irq_from = g_dbg_pc;
@@ -722,7 +751,7 @@ static void advance_vdp(uint64_t cyc){
  * fix that unifies the interrupt-sampling contract across all three CPU modes;
  * the hot path stays a single compare while no IRQ is pending. */
 void sms_set_sync_deadline(void){
-    g_sync_deadline = vdp_irq_asserted() ? g_z80.cyc + 1 : g_next_line_cyc;
+    g_sync_deadline = (g_nmi_pending||vdp_irq_asserted()) ? g_z80.cyc + 1 : g_next_line_cyc;
 }
 
 void sms_sync(void){
@@ -732,7 +761,7 @@ void sms_sync(void){
      * Before the next line there is no raster/frame/IRQ-accept job to run;
      * advance audio at the original instruction boundary and publish the next
      * deadline directly. Status/enable writes are observed on every call. */
-    if(!g_diff_freeze && !g_z80.iff1 && g_z80.cyc<g_next_line_cyc){
+    if(!g_diff_freeze && !g_nmi_pending && !g_z80.iff1 && g_z80.cyc<g_next_line_cyc){
         if(g_audio_sink && g_z80.cyc>g_psg_cyc){
             psg_advance((uint32_t)(g_z80.cyc-g_psg_cyc));g_psg_cyc=g_z80.cyc;
         }
@@ -741,7 +770,8 @@ void sms_sync(void){
     }
 #endif
     advance_vdp(g_z80.cyc);
-    if (vdp_irq_asserted() && g_z80.iff1 && !g_z80.ei_block)
+    if(g_nmi_pending){g_nmi_pending=false;take_nmi();}
+    else if (vdp_irq_asserted() && g_z80.iff1 && !g_z80.ei_block)
         take_irq();
     sms_set_sync_deadline();
     g_sync_depth--;
@@ -1153,8 +1183,9 @@ void sms_dispatch_miss(uint16_t addr){
         }
     }
 
-    /* Robust fallback: interpret the routine to completion with live banking. */
-    hybrid_interpret(addr);
+    fprintf(stderr,"[HLE coverage] unsupported native target %04X; stopped\n",addr);
+    if(g_running)longjmp(g_quit_env,2);
+    abort();
 }
 
 /* ====================== lifecycle ====================== */
@@ -1214,6 +1245,12 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     psg_init();                          /* fresh PSG state */
     g_psg_cyc = 0;
     g_pad1 = g_pad2 = 0;                  /* controllers idle */
+    g_pause_held=g_nmi_pending=false;g_nmi_count=0;
+    g_mod_pulse_release=0;g_mod_transaction=false;g_mod_hook_count=g_mod_applied_count=0;
+    glue_register_mod_hook("console.start-pause",console_hook_apply,console_hook_finish,NULL);
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    if(g_game_spec.on_post_reset)g_game_spec.on_post_reset();
+#endif
     g_hybrid_cyc = g_hybrid_calls = 0;
     glue_diff_init();                    /* differential harness (env-gated, no-op unless SMS_DIFF_ADDR) */
     vdp_enable_raster(g_frame_cb || g_dump_path);
@@ -1316,12 +1353,51 @@ void     glue_set_audio_sink(void (*sink)(const int16_t *stereo_frames, size_t f
 }
 uint32_t glue_audio_sample_rate(void){ return psg_sample_rate(); }
 double   glue_frame_rate(void){ return (double)SMS_Z80_HZ / (double)SMS_CYC_PER_FRAME; }
-void     glue_set_pad1(uint8_t pressed){ g_pad1 = pressed; }
+void     glue_set_pad1(uint8_t pressed){
+    bool held=(pressed&SMS_PAD_START)!=0;
+    if(!g_is_gg&&held&&!g_pause_held){g_nmi_pending=true;g_sync_deadline=g_z80.cyc+1;}
+    g_pause_held=held;g_pad1=pressed;
+}
+uint8_t  glue_get_pad1(void){return g_pad1;}
+uint64_t glue_nmi_count(void){return g_nmi_count;}
 void     glue_set_pad2(uint8_t pressed){ g_pad2 = pressed; }
 void     glue_set_input_cb(uint8_t (*cb)(uint64_t frame)){ g_input_cb = cb; }
 uint64_t glue_frame_count(void){ return g_frame; }
 uint32_t glue_rom_crc32(void){ return g_rom_crc; }
 void glue_set_boundary_callback(int (*cb)(uint64_t)){ g_boundary_cb = cb; }
+bool glue_mod_read(const char *space,uint64_t address,uint8_t *out,size_t size){
+ uint8_t *p=NULL;size_t bound=0;
+ if(!strcmp(space,"ram")){p=g_ram;bound=sizeof g_ram;}
+ else if(!strcmp(space,"cartridge")){p=g_rom;bound=g_rom_size;}
+ if(!p||address>bound||size>bound-(size_t)address)return false;
+ memcpy(out,p+(size_t)address,size);return true;
+}
+bool glue_mod_write(const char *space,uint64_t address,const uint8_t *data,size_t size){
+ uint8_t *p=NULL;size_t bound=0;
+ if(!strcmp(space,"ram")){p=g_ram;bound=sizeof g_ram;}
+ else if(!strcmp(space,"cartridge")){p=g_rom;bound=g_rom_size;}
+ if(!p||address>bound||size>bound-(size_t)address)return false;
+ memcpy(p+(size_t)address,data,size);return true;
+}
+const uint8_t *glue_original_image(size_t *size){*size=g_rom_size;return g_rom;}
+bool glue_register_mod_hook(const char *id,SmsModHookApply apply,SmsModHookFinish finish,void *user){
+ if(!id||!*id||strlen(id)>=64||!apply||!finish||g_mod_transaction||g_mod_hook_count>=32)return false;
+ for(unsigned i=0;i<g_mod_hook_count;i++)if(!strcmp(id,g_mod_hooks[i].id))return false;
+ ModHook *hook=&g_mod_hooks[g_mod_hook_count++];snprintf(hook->id,sizeof hook->id,"%s",id);hook->apply=apply;hook->finish=finish;hook->user=user;return true;
+}
+int glue_mod_begin(void){if(g_mod_transaction)return 0;g_mod_transaction=true;g_mod_applied_count=0;return 1;}
+int glue_mod_hook(const char *id){
+ if(!g_mod_transaction||!id)return 0;
+ for(unsigned i=0;i<g_mod_hook_count;i++)if(!strcmp(id,g_mod_hooks[i].id)){
+  if(g_mod_applied_count>=32)return 0;g_mod_applied[g_mod_applied_count++]=i;
+  return g_mod_hooks[i].apply(g_mod_hooks[i].user);
+ }return 0;
+}
+void glue_mod_finish(int committed){
+ while(g_mod_applied_count){ModHook *hook=&g_mod_hooks[g_mod_applied[--g_mod_applied_count]];hook->finish(hook->user,committed);}
+ g_mod_transaction=false;
+}
+
 
 bool glue_write_report(const char *path){
     FILE *f = fopen(path,"w");
@@ -1332,7 +1408,7 @@ bool glue_write_report(const char *path){
               "\"interpreted_cycles\":%llu,\"native_cycles\":%llu,"
               "\"fallback_calls\":%llu,\"dispatch_misses\":%d,\"banks\":[%d,%d,%d]}\n",
             g_rom_crc,(unsigned long long)g_rom_size,(unsigned long long)g_frame,
-            g_interpreter_only?"interpreter":"hybrid",(unsigned long long)g_elapsed_cyc,
+            g_interpreter_only?"interpreter":"host-native",(unsigned long long)g_elapsed_cyc,
             (unsigned long long)interpreted,(unsigned long long)(g_elapsed_cyc-interpreted),
             (unsigned long long)g_hybrid_calls,g_miss_count,g_bank[0],g_bank[1],g_bank[2]);
     bool ok = !ferror(f); return fclose(f)==0 && ok;

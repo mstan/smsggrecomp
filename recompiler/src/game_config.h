@@ -13,6 +13,7 @@
 
 typedef struct {
     char        output_prefix[64];
+    char        display_name[128];
     char        rom_path[260];      /* as written in game.toml (relative) */
     SmsPlatform platform;
     bool        have_crc;

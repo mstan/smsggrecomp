@@ -41,6 +41,7 @@ bool game_config_load(const char *path, GameConfig *out){
     if (game){
         toml_datum_t d;
         d = toml_string_in(game,"output_prefix"); if (d.ok){ copy_str(out->output_prefix,sizeof(out->output_prefix),d.u.s); free(d.u.s); }
+        d = toml_string_in(game,"name"); if(d.ok){copy_str(out->display_name,sizeof(out->display_name),d.u.s);free(d.u.s);}
         d = toml_string_in(game,"rom");           if (d.ok){ copy_str(out->rom_path,sizeof(out->rom_path),d.u.s); free(d.u.s); }
         d = toml_string_in(game,"platform");      if (d.ok){ out->platform = (strcmp(d.u.s,"gg")==0)?SMS_PLATFORM_GG:SMS_PLATFORM_SMS; free(d.u.s); }
         d = toml_int_in(game,"crc32");            if (d.ok){ out->have_crc=true; out->crc32=(uint32_t)d.u.i; }
@@ -82,6 +83,7 @@ bool game_config_load(const char *path, GameConfig *out){
     toml_free(root);
 
     if (out->output_prefix[0]=='\0'){ fprintf(stderr,"[cfg] missing [game].output_prefix\n"); return false; }
+    if(strpbrk(out->display_name,"\"\\\r\n")){fprintf(stderr,"[cfg] game.name contains an unsupported delimiter\n");return false;}
     if (out->rom_path[0]=='\0'){ fprintf(stderr,"[cfg] missing [game].rom\n"); return false; }
 
     printf("[cfg] prefix=%s platform=%s rom=%s extras=%d blacklist=%d\n",
