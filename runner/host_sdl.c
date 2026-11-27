@@ -17,6 +17,8 @@
 #include "recomp_input.h"
 #include "recomp_audio.h"
 #include "retro_presentation/pacing.h"
+#include "retro_presentation/sdl2.h"
+#include "retro_presentation/capture.h"
 #include "glue.h"       /* SMS_PAD_* bit constants (the controller contract) */
 #ifdef SMS_GPU
 #include "host_gl.h"
@@ -29,7 +31,7 @@
 
 static SDL_Window   *g_win;
 static SDL_Renderer *g_ren;
-static SDL_Texture  *g_tex;
+static RpSdl2       *g_presentation;
 static SDL_Rect      g_src;     /* crop region of the framebuffer */
 static int g_internal_scale;
 static bool g_hidden,g_gpu;
@@ -105,9 +107,8 @@ bool host_init(int fb_w, int fb_h,
     /* integer-scale crisply; letterbox to preserve aspect */
     SDL_RenderSetLogicalSize(g_ren, crop_w, crop_h);
 
-    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888,
-                              SDL_TEXTUREACCESS_STREAMING, fb_w, fb_h);
-    if (!g_tex){ fprintf(stderr, "[host] CreateTexture: %s\n", SDL_GetError()); return false; }
+    g_presentation = rp_sdl2_create(g_ren, SDL_PIXELFORMAT_ARGB8888, fb_w, fb_h, -1);
+    if (!g_presentation){ fprintf(stderr, "[host] CreateTexture: %s\n", SDL_GetError()); return false; }
     return true;
 }
 
@@ -175,22 +176,6 @@ void host_set_capture(const char *dir, int w, int h, uint64_t from, uint64_t to,
     g_cap_w = w; g_cap_h = h; g_cap_from = from; g_cap_to = to; g_cap_every = every ? every : 1;
 }
 uint32_t host_capture_written(void){ return g_cap_written; }
-static void cap_fit(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dw, int dh){
-    memset(dst, 0, (size_t)dw * dh * 4);
-    for (int i = 0; i < dw * dh; i++) dst[i] = 0xFF000000u;
-    int scale_n = dw * sh < dh * sw ? dw : dh, scale_d = dw * sh < dh * sw ? sw : sh;
-    int ow = (int)((int64_t)sw * scale_n / scale_d), oh = (int)((int64_t)sh * scale_n / scale_d);
-    if (ow > dw) ow = dw;
-    if (oh > dh) oh = dh;
-    int ox = (dw - ow) / 2, oy = (dh - oh) / 2;
-    for (int y = 0; y < oh; y++){
-        int sy = (int)((int64_t)y * sh / oh);
-        for (int x = 0; x < ow; x++){
-            int sx = (int)((int64_t)x * sw / ow);
-            dst[(size_t)(oy + y) * dw + ox + x] = src[(size_t)sy * sstride + sx] | 0xFF000000u;
-        }
-    }
-}
 static void host_capture_frame(const uint32_t *fb, int fb_w){
     uint64_t idx = glue_frame_count() - 1;   /* 0-based frame just presented */
     if (idx < g_cap_from || idx > g_cap_to || ((idx - g_cap_from) % g_cap_every)) return;
@@ -215,7 +200,7 @@ static void host_capture_frame(const uint32_t *fb, int fb_w){
         if (pix) for (int y = 0; y < h; y++) memcpy(pix + (size_t)y * w, src + (size_t)y * stride, (size_t)w * 4);
     } else {
         pix = (uint32_t *)malloc((size_t)ow * oh * 4);
-        if (pix) cap_fit(src, w, h, stride, pix, ow, oh);
+        if (pix) rp_capture_argb(src, w, h, stride, pix, ow, oh);
     }
     if (pix && png_write_argb(path, pix, ow, oh, ow) == 0) g_cap_written++;
     free(pix); free(own);
@@ -243,10 +228,10 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
     if(g_gpu)host_gl_present(vdp_frame_jobs());else
 #endif
     {
-    if (!g_tex) return false;
-    SDL_UpdateTexture(g_tex, NULL, fb, fb_w * (int)sizeof(uint32_t));
+    if (!g_presentation) return false;
+    rp_sdl2_upload(g_presentation, fb, fb_w * (int)sizeof(uint32_t));
     SDL_RenderClear(g_ren);
-    SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
+    rp_sdl2_copy(g_presentation, rp_sdl2_texture(g_presentation), &g_src, NULL, g_src.w, g_src.h, 0);
     SDL_RenderPresent(g_ren);
     }
     (void)fb_h;
@@ -266,10 +251,10 @@ void host_shutdown(void){
     host_gl_shutdown();
 #endif
     g_gpu=false;
-    if (g_tex) SDL_DestroyTexture(g_tex);
+    rp_sdl2_destroy(g_presentation);
     if (g_ren) SDL_DestroyRenderer(g_ren);
     if (g_win) SDL_DestroyWindow(g_win);
-    g_tex = NULL; g_ren = NULL; g_win = NULL;
+    g_presentation = NULL; g_ren = NULL; g_win = NULL;
     for(unsigned i=0;i<RI_MAX_DEVICES;i++)if(g_controllers[i]){SDL_GameControllerClose(g_controllers[i]);g_controllers[i]=NULL;}
     ri_destroy(g_input);g_input=NULL;
     SDL_Quit();
