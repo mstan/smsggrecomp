@@ -1,8 +1,8 @@
 /* End-to-end front-end test: synthetic ROM -> decoder -> function_finder.
  * Build via PowerShell:
- *   gcc -I recompiler/src tests/frontend_selftest.c \
- *       recompiler/src/function_finder.c recompiler/src/z80_decoder.c \
- *       recompiler/src/rom_parser.c -o ft.exe
+ *   cmake -S recompiler -B build/recompiler
+ *   cmake --build build/recompiler --target sms_frontend_selftest
+ *   ctest --test-dir build/recompiler -R sms_frontend --output-on-failure
  */
 #include "function_finder.h"
 #include <stdio.h>

@@ -1,5 +1,6 @@
-/* Throwaway self-test for z80_decode. Compile:
- *   gcc -Wall _decoder_selftest.c z80_decoder.c -o dt && ./dt
+/* Consumer self-test for the shared z80_decode provider:
+ *   cmake --build build/recompiler --target sms_decoder_selftest
+ *   ctest --test-dir build/recompiler -R sms_decoder --output-on-failure
  */
 #include "z80_decoder.h"
 #include <stdio.h>
