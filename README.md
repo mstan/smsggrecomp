@@ -97,7 +97,7 @@ silicon. Computed jumps outside generated coverage stop with an explicit native
 coverage error. Production play never enters an interpreter fallback.
 
 Key pieces:
-- **`z80_decoder.c`** — full Z80 ISA decode incl. the `CB`/`ED`/`DD`/`FD`/
+- **Shared `z80-recomp-core` decoder** — full Z80 ISA decode incl. the `CB`/`ED`/`DD`/`FD`/
   `DDCB`/`FDCB` prefix groups; classifies control flow (JP/JR/CALL/RET/RST/
   DJNZ) for the function finder. Semantics anchored to the vendored MIT
   `superzazu/z80.c`.
