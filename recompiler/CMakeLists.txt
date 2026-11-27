@@ -5,6 +5,10 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(Z80_RECOMP_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../external/z80-recomp-core")
+if(RECOMP_SHARED_CORE_ROOT AND
+   EXISTS "${RECOMP_SHARED_CORE_ROOT}/z80-recomp-core/CMakeLists.txt")
+    set(Z80_RECOMP_CORE_DIR "${RECOMP_SHARED_CORE_ROOT}/z80-recomp-core")
+endif()
 if(NOT TARGET z80-recomp-core::frontend)
     add_subdirectory("${Z80_RECOMP_CORE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/z80-recomp-core")
 endif()
