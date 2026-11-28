@@ -45,7 +45,9 @@ typedef enum {
 } SmsMapper;
 
 typedef struct {
-    uint8_t    *data;            /* raw ROM bytes (owned) */
+    size_t original_size, copier_offset;
+    uint32_t original_crc32;
+    uint8_t    *data;            /* normalized ROM bytes (owned) */
     size_t      size;            /* file size in bytes */
     int         num_banks;       /* ceil(size / 16 KB) */
     uint32_t    crc32;           /* zlib CRC32 of the whole file */

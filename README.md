@@ -171,6 +171,18 @@ directory and point `game.toml` at it. SMS ROMs are `.sms`, Game Gear `.gg`;
 both are raw Z80 images with the `TMR SEGA` footer near the end of the first
 32 KB.
 
+Cartridge inputs remain read-only. The compiler, runtime and donor importer
+share one bounded cartridge view, including the existing 512-byte copier-header
+rule. Generated profiles use the normalized cartridge CRC and size; mod target
+guards retain the original file SHA-256. Runtime diagnostics report both the
+original and normalized SHA-256 identities. Version-1 donor offsets address
+the original file bytes, while cartridge and RAM overlays remain writable and
+transactionally guarded at runtime.
+
+The coverage helper runs host-native HLE routes only. `--case` selects an
+individual title-owned route; `--reference` can compare an existing matching
+report and capture directory without launching another execution backend.
+
 ## Acknowledgements
 
 - **superzazu** — the vendored MIT Z80 interpreter (`runner/external/superzazu/`)
