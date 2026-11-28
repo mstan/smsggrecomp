@@ -22,7 +22,7 @@
 static DiagServer *server;
 static RecompReplayWriter *writer;
 static rmod_context *mods;
-static char original_sha[65],plan_sha[65],status_path[1024];
+static char original_sha[65],normalized_sha[65],plan_sha[65],status_path[1024];
 static bool paused,quitting,override,show_ready,failed;
 static bool has_window;
 static uint8_t input;
@@ -44,8 +44,8 @@ static void status(char *out,size_t cap){
 #endif
  /* Controller names are logged separately to avoid unsafe JSON injection. */
  (void)controller;
- snprintf(out,cap,"{\"ok\":true,\"pid\":%lu,\"frame\":%llu,\"nmi_count\":%llu,\"paused\":%s,\"pad\":%u,\"recording\":%s,\"port\":%u,\"platform\":\"%s\",\"original_sha256\":\"%s\",\"plan_sha256\":\"%s\",\"dispatch_misses\":%d,\"providers\":[\"z80-recomp-core\",\"sega-psg-core\",\"recomp-audio-core\",\"recomp-input-core\",\"recomp-presentation-core\",\"recomp-persistence-core\",\"recomp-mod-core\",\"recomp-diagnostics-core\"]}",
- pid,(unsigned long long)glue_frame_count(),(unsigned long long)glue_nmi_count(),paused?"true":"false",input,sms_recording_enabled()?"true":"false",server?diag_server_port(server):0,g_game_spec.platform==GAME_PLATFORM_GG?"Game Gear":"Master System",original_sha,plan_sha,glue_dispatch_miss_count());
+ snprintf(out,cap,"{\"ok\":true,\"pid\":%lu,\"frame\":%llu,\"nmi_count\":%llu,\"paused\":%s,\"pad\":%u,\"recording\":%s,\"port\":%u,\"platform\":\"%s\",\"original_sha256\":\"%s\",\"normalized_sha256\":\"%s\",\"plan_sha256\":\"%s\",\"dispatch_misses\":%d,\"providers\":[\"z80-recomp-core\",\"sega-psg-core\",\"recomp-audio-core\",\"recomp-input-core\",\"recomp-presentation-core\",\"recomp-persistence-core\",\"recomp-mod-core\",\"recomp-diagnostics-core\"]}",
+ pid,(unsigned long long)glue_frame_count(),(unsigned long long)glue_nmi_count(),paused?"true":"false",input,sms_recording_enabled()?"true":"false",server?diag_server_port(server):0,g_game_spec.platform==GAME_PLATFORM_GG?"Game Gear":"Master System",original_sha,normalized_sha,plan_sha,glue_dispatch_miss_count());
 }
 static void save_status(void){if(status_path[0]){char text[2048];status(text,sizeof text);if(!recomp_atomic_file_store(status_path,text,strlen(text)))failed=true;}}
 static void pause_runtime(bool value){paused=value;
@@ -109,7 +109,9 @@ int sms_services_init(const char *rom,unsigned port,uint64_t stop,bool show,bool
  (void)rom;pause_at=stop;show_ready=show;has_window=window;if(path)snprintf(status_path,sizeof status_path,"%s",path);
  size_t size;const uint8_t *image=glue_original_image(&size);uint8_t sha[32],plan[32];
  if(!rmod_sha256_bytes(image,size,sha)||!rmod_sha256_bytes("smsgg-runtime-plan-v1",21,plan))return 0;
- hex(sha,32,original_sha);hex(plan,32,plan_sha);mods=rmod_create();
+ hex(sha,32,original_sha);image=glue_normalized_image(&size);
+ if(!rmod_sha256_bytes(image,size,sha))return 0;hex(sha,32,normalized_sha);
+ hex(plan,32,plan_sha);mods=rmod_create();
  if(!mods||!rmod_bind_plan(mods,g_game_spec.short_name,original_sha,plan_sha))return 0;
  if(!sms_content_prepare(rom)){fprintf(stderr,"[mods] %s\n",sms_content_error());return 0;}
  rmod_engine engine={NULL,g_game_spec.short_name,original_sha,begin,read_bytes,write_bytes,hook,finish};

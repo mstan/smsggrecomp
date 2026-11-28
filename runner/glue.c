@@ -19,6 +19,7 @@
 #include "video/sms_vdp.h"
 #include "external/superzazu/z80.h"
 #include "png_write.h"
+#include "../common/sms_cartridge.h"
 #include "audio/sn76489.h"
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
@@ -35,6 +36,7 @@ uint64_t  g_sync_deadline;
 uint64_t  g_frame_ic;   /* per-frame instruction count probe */
 
 static uint8_t  *g_rom;
+static SmsCartridge g_original;
 static size_t    g_rom_size;
 static uint32_t  g_rom_crc;
 static uint8_t   g_ram[0x2000];     /* 8 KB system RAM ($C000-$DFFF) */
@@ -1190,32 +1192,25 @@ void sms_dispatch_miss(uint16_t addr){
 
 /* ====================== lifecycle ====================== */
 bool glue_load_rom(const char *path){
-    FILE *f = fopen(path, "rb");
-    if (!f){ fprintf(stderr, "[runner] cannot open ROM %s\n", path); return false; }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0){ fclose(f); fprintf(stderr, "[runner] empty ROM\n"); return false; }
-    uint8_t *loaded = (uint8_t*)malloc((size_t)sz);
-    if (!loaded){ fclose(f); return false; }
-    size_t got = fread(loaded, 1, (size_t)sz, f);
-    fclose(f);
-    if(got!=(size_t)sz){free(loaded);return false;}
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i=0; i<got; ++i){
-        crc ^= loaded[i];
-        for (int b=0; b<8; ++b) crc = (crc>>1) ^ (0xEDB88320u & (0u-(crc&1u)));
+    SmsCartridge image;
+    if(!sms_cartridge_read(path,&image)){
+        fprintf(stderr,"[runner] invalid or unsupported original cartridge: %s\n",path);
+        return false;
     }
-    crc = ~crc;
+    size_t got=image.size;uint32_t crc=image.crc32;
+    uint8_t *loaded=(uint8_t*)malloc(got);
+    if(!loaded){sms_cartridge_release(&image);return false;}
+    memcpy(loaded,image.data,got);
 #ifdef SMSGG_HAVE_GAME_LAYOUT
     if (crc != g_game_spec.expected_rom_crc32 ||
         got != g_game_spec.expected_rom_size){
         fprintf(stderr, "[runner] ROM does not match this generated build (expected %08X, %u bytes)\n",
                 g_game_spec.expected_rom_crc32, g_game_spec.expected_rom_size);
-        free(loaded);
+        free(loaded);sms_cartridge_release(&image);
         return false;
     }
 #endif
+    sms_cartridge_release(&g_original);g_original=image;
     free(g_rom);g_rom=loaded;g_rom_size=got;g_rom_crc=crc;
     for(int i=0;i<3;i++)set_bank(i,g_bank[i]);
     return true;
@@ -1379,7 +1374,8 @@ bool glue_mod_write(const char *space,uint64_t address,const uint8_t *data,size_
  if(!p||address>bound||size>bound-(size_t)address)return false;
  memcpy(p+(size_t)address,data,size);return true;
 }
-const uint8_t *glue_original_image(size_t *size){*size=g_rom_size;return g_rom;}
+const uint8_t *glue_original_image(size_t *size){*size=g_original.original_size;return g_original.original;}
+const uint8_t *glue_normalized_image(size_t *size){*size=g_original.size;return g_original.data;}
 bool glue_register_mod_hook(const char *id,SmsModHookApply apply,SmsModHookFinish finish,void *user){
  if(!id||!*id||strlen(id)>=64||!apply||!finish||g_mod_transaction||g_mod_hook_count>=32)return false;
  for(unsigned i=0;i<g_mod_hook_count;i++)if(!strcmp(id,g_mod_hooks[i].id))return false;

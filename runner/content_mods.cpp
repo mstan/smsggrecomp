@@ -5,6 +5,7 @@
 extern "C" {
 #include "game_spec.h"
 #include "toml.h"
+#include "../common/sms_cartridge.h"
 #include "recomp_persistence/atomic_file.h"
 }
 #include "recomp_mod/archive.hpp"
@@ -53,7 +54,7 @@ bool parse(const fs::path& path,Plan& plan){
  if(overlay){
   plan.donor_sha=text(overlay,"original_sha256");plan.space=text(overlay,"target_space");
   ok=ok&&sha_ok(plan.donor_sha)&&(plan.space=="ram"||plan.space=="cartridge")&&number(overlay,"original_size",plan.donor_size)&&number(overlay,"source_offset",plan.source_offset)&&number(overlay,"target_offset",plan.target_offset)&&number(overlay,"size",plan.size)&&decode(text(overlay,"expected_hex"),plan.expected);
-  ok=ok&&plan.donor_size>=8192&&plan.donor_size<=16*1024*1024&&plan.size&&plan.size<=4096&&plan.expected.size()==plan.size&&plan.source_offset<=plan.donor_size&&plan.size<=plan.donor_size-plan.source_offset;
+  ok=ok&&plan.donor_size>=8192&&plan.donor_size<=SMS_CARTRIDGE_MAX+512u&&plan.size&&plan.size<=4096&&plan.expected.size()==plan.size&&plan.source_offset<=plan.donor_size&&plan.size<=plan.donor_size-plan.source_offset;
  }
  auto *hooks=toml_array_in(root,"hook");if(hooks){int count=toml_array_nelem(hooks);if(count>8)ok=false;for(int i=0;i<count&&ok;i++){
   auto *entry=toml_table_at(hooks,i);std::string id=entry?text(entry,"id"):"";if(!id_ok(id))ok=false;else plan.hooks.push_back(id);
@@ -65,11 +66,14 @@ bool save(){std::string data;for(const auto& p:plans)data+=p.id+"|"+(p.enabled?"
 bool import(Plan& plan,const std::string& path){
  if(path.size()>=1024||path.find_first_of("\r\n|")!=std::string::npos)return fail("Invalid or too-long original-image path");
  if(path.empty()){plan.source_path.clear();plan.replacement.clear();plan.verified=false;return true;}
- std::vector<unsigned char> image;if(!read(fs::u8path(path),image,16*1024*1024))return false;
- if(image.size()!=plan.donor_size||hash(image.data(),image.size())!=plan.donor_sha)return fail("This original cartridge image does not match the feature's supported dump");
- bool header=false;for(size_t at:{size_t(0x1ff0),size_t(0x3ff0),size_t(0x7ff0)})if(at+8<=image.size()&&!std::memcmp(image.data()+at,"TMR SEGA",8))header=true;
- if(!header)return fail("Select the complete original SMS or Game Gear cartridge image");
- plan.replacement.assign(image.begin()+plan.source_offset,image.begin()+plan.source_offset+plan.size);plan.source_path=path;plan.verified=true;return true;
+ SmsCartridge image;
+ if(!sms_cartridge_read(path.c_str(),&image))return fail("Cannot read a complete supported cartridge image");
+ std::unique_ptr<SmsCartridge,decltype(&sms_cartridge_release)> owner(&image,sms_cartridge_release);
+ if(image.original_size!=plan.donor_size||hash(image.original,image.original_size)!=plan.donor_sha)return fail("This original cartridge image does not match the feature's supported dump");
+ if(!sms_cartridge_has_header(&image))return fail("Select the complete original SMS or Game Gear cartridge image");
+ const auto *source=sms_cartridge_original_extent(&image,plan.source_offset,plan.size);
+ if(!source)return fail("Donor content exceeds the original image extent");
+ plan.replacement.assign(source,source+plan.size);plan.source_path=path;plan.verified=true;return true;
 }
 }
 extern "C" void sms_content_load(void) try {
@@ -109,7 +113,8 @@ extern "C" int sms_content_enable(const char *id,int enabled) try {sms_content_l
 extern "C" int sms_content_import(const char *id,const char *path) try {sms_content_load();auto *p=find(id);if(!p||!p->size||!path)return fail("Unknown original-image resource");Plan old=*p;if(!import(*p,path))return 0;if(save()){error.clear();return 1;}*p=std::move(old);return 0;}catch(...){return fail("Original-image import failed");}
 extern "C" int sms_content_prepare(const char *original) try {
  sms_content_load();if(catalog_failed)return fail(error.empty()?"Content catalog requires repair":error);
- std::vector<unsigned char> image;if(!original||!read(fs::u8path(original),image,16*1024*1024))return 0;prepared_original=hash(image.data(),image.size());
+ SmsCartridge image;if(!original||!sms_cartridge_read(original,&image))return fail("Cannot read a complete supported cartridge image");
+ prepared_original=hash(image.original,image.original_size);sms_cartridge_release(&image);
  for(auto& p:plans)if(p.enabled){if(p.target_sha!=prepared_original)return fail("Content feature targets a different original game image");if(p.size&&!import(p,p.source_path))return 0;if(p.size&&!p.verified)return fail("Select the supported original donor image before enabling this content feature");}
  error.clear();return 1;
 }catch(...){return fail("Content preparation failed");}

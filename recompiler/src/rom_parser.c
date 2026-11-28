@@ -2,6 +2,7 @@
  * rom_parser.c — SMS/GG ROM parsing. See rom_parser.h.
  */
 #include "rom_parser.h"
+#include "../../common/sms_cartridge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,25 +10,6 @@
 const uint16_t Z80_RST_VECTORS[8] = {
     0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38
 };
-
-/* ---- CRC32 (zlib polynomial, reflected) ---- */
-static uint32_t crc32_buf(const uint8_t *p, size_t n) {
-    static uint32_t table[256];
-    static int built = 0;
-    if (!built) {
-        for (uint32_t i = 0; i < 256; i++) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; k++)
-                c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            table[i] = c;
-        }
-        built = 1;
-    }
-    uint32_t c = 0xFFFFFFFFu;
-    for (size_t i = 0; i < n; i++)
-        c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFu;
-}
 
 /* Declared-size nibble -> bytes. 0xA..0xF then wraps 0x0..0x2 per the SEGA
  * footer convention. Informational only; we trust the file size for paging. */
@@ -63,28 +45,22 @@ bool rom_parse(const char *path, SmsRom *out) {
     memset(out, 0, sizeof(*out));
     out->header_offset = -1;
 
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "[rom] cannot open %s\n", path); return false; }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); fprintf(stderr, "[rom] empty file\n"); return false; }
-
-    /* Some dumps carry a 512-byte copier header; strip it if size %16KB == 512. */
-    long copier = (sz % SMS_BANK_SIZE == 512) ? 512 : 0;
-    if (copier) fseek(f, copier, SEEK_SET);
-    size_t data_sz = (size_t)(sz - copier);
-
-    out->data = (uint8_t *)malloc(data_sz);
-    if (!out->data) { fclose(f); return false; }
-    if (fread(out->data, 1, data_sz, f) != data_sz) {
-        fclose(f); free(out->data); out->data = NULL; return false;
+    SmsCartridge image;
+    if(!sms_cartridge_read(path,&image)) {
+        fprintf(stderr,"[rom] invalid or unsupported cartridge extent: %s\n",path);
+        return false;
     }
-    fclose(f);
-
-    out->size = data_sz;
-    out->num_banks = (int)((data_sz + SMS_BANK_SIZE - 1) / SMS_BANK_SIZE);
-    out->crc32 = crc32_buf(out->data, data_sz);
+    size_t data_sz=image.size;
+    out->data=(uint8_t*)malloc(data_sz);
+    if(!out->data){sms_cartridge_release(&image);return false;}
+    memcpy(out->data,image.data,data_sz);
+    out->size=data_sz;
+    out->num_banks=(int)((data_sz+SMS_BANK_SIZE-1)/SMS_BANK_SIZE);
+    out->crc32=image.crc32;
+    out->original_size=image.original_size;
+    out->original_crc32=image.original_crc32;
+    out->copier_offset=image.offset;
+    sms_cartridge_release(&image);
 
     /* Locate TMR SEGA footer. */
     const long cands[3] = { 0x7FF0, 0x3FF0, 0x1FF0 };
@@ -129,7 +105,7 @@ bool rom_parse(const char *path, SmsRom *out) {
 
     printf("[rom] %s\n", path);
     printf("[rom]   size=%zu bytes (%d x 16KB banks)%s\n", out->size,
-           out->num_banks, copier ? " [stripped 512B copier header]" : "");
+           out->num_banks, out->copier_offset ? " [stripped 512B copier header]" : "");
     printf("[rom]   crc32=0x%08X\n", out->crc32);
     printf("[rom]   platform=%s region=%s mapper=%s\n",
            out->platform == SMS_PLATFORM_GG ? "GameGear" : "MasterSystem",
