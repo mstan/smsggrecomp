@@ -35,6 +35,22 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     if(BUILD_TESTING)
         add_executable(sms_cartridge_selftest ../tests/cartridge_selftest.c)
         add_test(NAME sms_cartridge COMMAND sms_cartridge_selftest)
+        add_executable(sms_flat_live_generate ../tests/flat_step_live_selftest.c
+            src/code_generator.c src/function_finder.c src/rom_parser.c)
+        target_compile_definitions(sms_flat_live_generate PRIVATE SMS_TEST_GENERATE=1)
+        target_include_directories(sms_flat_live_generate PRIVATE src)
+        target_link_libraries(sms_flat_live_generate PRIVATE z80-recomp-core::frontend)
+        set(flat_live_fixture "${CMAKE_CURRENT_BINARY_DIR}/flat-live-fixture")
+        file(MAKE_DIRECTORY "${flat_live_fixture}")
+        add_custom_command(
+            OUTPUT "${flat_live_fixture}/flatfixture_step.c" "${flat_live_fixture}/flatfixture_step.h"
+            COMMAND sms_flat_live_generate "${flat_live_fixture}"
+            DEPENDS sms_flat_live_generate VERBATIM)
+        add_executable(sms_flat_live_selftest ../tests/flat_step_live_selftest.c
+            "${flat_live_fixture}/flatfixture_step.c")
+        target_include_directories(sms_flat_live_selftest PRIVATE
+            "${Z80_RECOMP_CORE_DIR}/include" "${flat_live_fixture}")
+        add_test(NAME sms_flat_live COMMAND sms_flat_live_selftest)
         add_executable(sms_decoder_selftest ../tests/z80_decoder_selftest.c)
         target_link_libraries(sms_decoder_selftest PRIVATE z80-recomp-core::frontend)
         add_test(NAME sms_decoder COMMAND sms_decoder_selftest)
