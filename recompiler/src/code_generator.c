@@ -690,18 +690,23 @@ void cg_emit_flat_step(const SmsRom *rom, const GameConfig *cfg,
          * bytes. A different revision, incomplete upload, or uncaptured
          * self-modified instruction takes the host's explicit interpreter
          * fallback. Matching paths perform no runtime opcode decode. */
-        bool same_shape = true;
-        for (int u = 1; u < unique_count; ++u) {
-            if (decoded[u].prefix != decoded[0].prefix ||
-                decoded[u].opcode != decoded[0].opcode ||
-                decoded[u].length != decoded[0].length) {
-                same_shape = false;
-                break;
+        bool live_shape[9] = {false};
+        for (int u = 0; u < unique_count; ++u) {
+            bool covered = false;
+            for (int v = 0; v < u; ++v) {
+                if (live_shape[v] && decoded[v].prefix == decoded[u].prefix &&
+                    decoded[v].opcode == decoded[u].opcode &&
+                    decoded[v].length == decoded[u].length) {
+                    covered = true;
+                    break;
+                }
             }
-        }
-        if (!(same_shape && emit_flat_live_operands(o, scratch, &decoded[0], addr))) {
-            for (int u = 0; u < unique_count; ++u)
-                emit_flat_match(o, scratch, &decoded[u], addr);
+            if (covered) continue;
+            /* Uploaded RAM programs can share a PC with a different bootstrap
+             * instruction. Preserve live operands for each native opcode shape,
+             * rather than requiring all image alternatives to have one shape. */
+            live_shape[u] = emit_flat_live_operands(o, scratch, &decoded[u], addr);
+            if (!live_shape[u]) emit_flat_match(o, scratch, &decoded[u], addr);
         }
         fprintf(o, "        sms_dispatch_miss(0x%04X);\n        return;\n    }\n", addr);
         emitted++;
